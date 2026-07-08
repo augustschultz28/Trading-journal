@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useMemo, useCallback } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, BarChart, Bar, ReferenceLine
 } from "recharts";
-import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, RotateCcw, Settings2, ChevronDown, ChevronUp } from "lucide-react";
+import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, RotateCcw, Settings2, ChevronDown, ChevronUp, Upload, Download } from "lucide-react";
+import Papa from "papaparse";
 
 // ---------- constants ----------
 
@@ -27,8 +28,8 @@ const DOW_LABELS_SHORT = ["S", "M", "T", "W", "T", "F", "S"];
 function heatColor(value, maxAbs) {
   if (!maxAbs || value === 0 || value === null || value === undefined) return "rgba(139,146,158,0.08)";
   const intensity = Math.min(Math.abs(value) / maxAbs, 1);
-  const alpha = 0.14 + intensity * 0.72;
-  const [r, g, b] = value > 0 ? [95, 163, 122] : [194, 99, 74];
+  const alpha = 0.24 + intensity * 0.74;
+  const [r, g, b] = value > 0 ? [110, 189, 142] : [214, 118, 91];
   return `rgba(${r},${g},${b},${alpha.toFixed(2)})`;
 }
 
@@ -100,14 +101,17 @@ function calcStats(trades) {
 }
 
 function equityCurve(trades) {
+  if (trades.length === 0) return [];
   const sorted = [...trades].sort(
     (a, b) => new Date(`${a.date}T${a.time || "00:00"}`) - new Date(`${b.date}T${b.time || "00:00"}`)
   );
   let equity = 0;
-  return sorted.map((t, i) => {
+  const points = [{ i: 0, date: sorted[0].date, equity: 0 }];
+  sorted.forEach((t, idx) => {
     equity += t.pnl;
-    return { i: i + 1, date: t.date, equity: Number(equity.toFixed(2)) };
+    points.push({ i: idx + 1, date: t.date, equity: Number(equity.toFixed(2)) });
   });
+  return points;
 }
 
 // ---------- storage ----------
@@ -145,6 +149,8 @@ export default function TradingJournal() {
   const [filterStrategies, setFilterStrategies] = useState([]);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
+  const [importPreview, setImportPreview] = useState(null); // { parsed, errorCount, total }
+  const fileInputRef = useRef(null);
 
   useEffect(() => {
     (async () => {
@@ -218,6 +224,93 @@ export default function TradingJournal() {
 
   const handleDelete = (id) => setTrades((prev) => prev.filter((t) => t.id !== id));
   const startEdit = (t) => { setEditingId(t.id); setShowForm(true); };
+
+  const handleExport = () => {
+    const rows = trades.map((t) => ({
+      date: t.date,
+      time: t.time || "",
+      market: t.market,
+      strategy: t.strategy || "",
+      direction: t.direction,
+      contracts: t.contracts,
+      entry: t.entry ?? "",
+      exit: t.exit ?? "",
+      fees: t.fees ?? 0,
+      pnl: t.pnl,
+      notes: t.notes || "",
+    }));
+    const csv = Papa.unparse(rows);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `trade-journal-export-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const triggerImport = () => fileInputRef.current?.click();
+
+  const processImportRows = (rows) => {
+    const parsed = [];
+    let errorCount = 0;
+    rows.forEach((row) => {
+      const dateRaw = (row.date || row.Date || "").toString().trim();
+      if (!dateRaw) { errorCount++; return; }
+      let date = dateRaw;
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        const d = new Date(dateRaw);
+        if (isNaN(d.getTime())) { errorCount++; return; }
+        date = d.toISOString().slice(0, 10);
+      }
+      const pnlRaw = row.pnl ?? row.PnL ?? row["P&L"] ?? row.PNL;
+      const pnl = parseFloat(pnlRaw);
+      if (Number.isNaN(pnl)) { errorCount++; return; }
+
+      const marketRaw = (row.market || row.Market || "").toString().trim().toUpperCase();
+      const direction = /short/i.test((row.direction || "").toString()) ? "Short" : "Long";
+      const contracts = parseFloat(row.contracts) || 1;
+      const entryVal = row.entry !== undefined && row.entry !== "" ? parseFloat(row.entry) : NaN;
+      const exitVal = row.exit !== undefined && row.exit !== "" ? parseFloat(row.exit) : NaN;
+      const fees = parseFloat(row.fees) || 0;
+
+      parsed.push({
+        id: uid(),
+        date,
+        time: (row.time || "").toString().trim(),
+        market: marketRaw || "MES",
+        strategy: (row.strategy || "").toString().trim(),
+        direction,
+        contracts,
+        entry: Number.isFinite(entryVal) ? entryVal : null,
+        exit: Number.isFinite(exitVal) ? exitVal : null,
+        fees,
+        pnl,
+        notes: (row.notes || "").toString().trim(),
+      });
+    });
+    setImportPreview({ parsed, errorCount, total: rows.length });
+  };
+
+  const handleFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (results) => processImportRows(results.data),
+    });
+    e.target.value = "";
+  };
+
+  const confirmImport = (mode) => {
+    if (!importPreview) return;
+    if (mode === "append") setTrades((prev) => [...prev, ...importPreview.parsed]);
+    if (mode === "replace") setTrades(importPreview.parsed);
+    setImportPreview(null);
+  };
 
   if (!ready) {
     return (
@@ -368,7 +461,27 @@ export default function TradingJournal() {
       <Header
         onAdd={() => { setEditingId(null); setShowForm(true); }}
         onSettings={() => setShowSettings((s) => !s)}
+        onExport={handleExport}
+        onImportClick={triggerImport}
       />
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".csv,text/csv"
+        style={{ display: "none" }}
+        onChange={handleFileChange}
+      />
+
+      {importPreview && (
+        <ImportPreviewModal
+          preview={importPreview}
+          existingCount={trades.length}
+          onAppend={() => confirmImport("append")}
+          onReplace={() => confirmImport("replace")}
+          onCancel={() => setImportPreview(null)}
+        />
+      )}
 
       {showSettings && (
         <SettingsPanel settings={settings} setSettings={setSettings} onClose={() => setShowSettings(false)} />
@@ -442,20 +555,64 @@ export default function TradingJournal() {
 
 // ---------- header ----------
 
-function Header({ onAdd, onSettings }) {
+function Header({ onAdd, onSettings, onExport, onImportClick }) {
   return (
     <div className="fj-header">
       <div>
         <h1 className="fj-title">Position Ledger</h1>
         <div className="fj-sub">Futures trade journal — MES · MNQ · MCL · MGC, tracked across strategies</div>
       </div>
-      <div style={{ display: "flex", gap: 8 }}>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <button className="fj-btn" onClick={onSettings}><Settings2 size={14} /> Contract settings</button>
+        <button className="fj-btn" onClick={onImportClick}><Upload size={14} /> Import CSV</button>
+        <button className="fj-btn" onClick={onExport}><Download size={14} /> Export CSV</button>
         <button className="fj-btn primary" onClick={onAdd}><Plus size={15} /> Add trade</button>
       </div>
     </div>
   );
 }
+
+function ImportPreviewModal({ preview, existingCount, onAppend, onReplace, onCancel }) {
+  const { parsed, errorCount, total } = preview;
+  return (
+    <div className="fj-modal-backdrop" onClick={onCancel}>
+      <div className="fj-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 460 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <p className="fj-panel-title" style={{ margin: 0 }}>Import CSV</p>
+          <button className="fj-iconbtn" onClick={onCancel}><X size={18} /></button>
+        </div>
+
+        <div className="fj-sub" style={{ marginBottom: 14, lineHeight: 1.6 }}>
+          Found <b style={{ color: "#E7E5E0" }}>{parsed.length}</b> valid trade{parsed.length === 1 ? "" : "s"} out of {total} row{total === 1 ? "" : "s"}.
+          {errorCount > 0 && (
+            <> {errorCount} row{errorCount === 1 ? "" : "s"} skipped — missing or unreadable date/market/P&amp;L.</>
+          )}
+        </div>
+
+        {parsed.length === 0 ? (
+          <div className="fj-empty" style={{ padding: "10px 0 16px" }}>
+            No valid trades found. Make sure the CSV has at least <span className="fj-mono">date</span>, <span className="fj-mono">market</span>, and <span className="fj-mono">pnl</span> columns.
+          </div>
+        ) : (
+          <div className="fj-sub" style={{ marginBottom: 16 }}>
+            You currently have <b style={{ color: "#E7E5E0" }}>{existingCount}</b> trade{existingCount === 1 ? "" : "s"} logged. Choose how to bring these in:
+          </div>
+        )}
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+          <button className="fj-btn" onClick={onCancel}>Cancel</button>
+          {parsed.length > 0 && (
+            <>
+              <button className="fj-btn danger" onClick={onReplace}>Replace all trades</button>
+              <button className="fj-btn primary" onClick={onAppend}>Append to existing</button>
+            </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 function SettingsPanel({ settings, setSettings, onClose }) {
   return (
@@ -576,7 +733,8 @@ function EquityChart({ curve, color = "#D9A441" }) {
         <ReferenceLine y={0} stroke="#3A4150" />
         <Tooltip
           contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
-          labelStyle={{ color: "#8B929E" }}
+          labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
+          itemStyle={{ color: "#E7E5E0" }}
           formatter={(v) => [money(v), "Equity"]}
           labelFormatter={(i) => `Trade #${i}`}
         />
@@ -611,6 +769,9 @@ function PortfolioView({ stats, curve, byMarket, byStrategy, settings }) {
                 <ReferenceLine y={0} stroke="#3A4150" />
                 <Tooltip
                   contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+                  labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
+                  itemStyle={{ color: "#E7E5E0" }}
+                  cursor={{ fill: "rgba(139,146,158,0.08)" }}
                   formatter={(v) => [money(v), "P&L"]}
                 />
                 <Bar dataKey="pnl" radius={[4, 4, 0, 0]} />
@@ -693,7 +854,7 @@ function TradeLog({ trades, onEdit, onDelete }) {
       <table className="fj-table">
         <thead>
           <tr>
-            <th>Date</th><th>Market</th><th>Strategy</th><th>Dir</th><th>Qty</th>
+            <th>Date</th><th>Time</th><th>Market</th><th>Strategy</th><th>Dir</th><th>Qty</th>
             <th>Entry</th><th>Exit</th><th>P&amp;L</th><th style={{ fontFamily: "Inter" }}>Notes</th><th></th>
           </tr>
         </thead>
@@ -701,6 +862,7 @@ function TradeLog({ trades, onEdit, onDelete }) {
           {sorted.map((t) => (
             <tr key={t.id}>
               <td>{t.date}</td>
+              <td>{t.time || "—"}</td>
               <td>{t.market}</td>
               <td style={{ fontFamily: "Inter, sans-serif" }}>{t.strategy || "—"}</td>
               <td className={t.direction === "Short" ? "fj-loss" : "fj-profit"}>{t.direction}</td>
@@ -829,8 +991,8 @@ function CalendarView({ trades, filterMarkets, strategies }) {
               <React.Fragment key={wi}>
                 {week.map((d) => {
                   const hasData = d.count > 0;
-                  const darkText = "#181B20";
-                  const darkMuted = "rgba(24,27,32,0.7)";
+                  const lightText = "#F3F1EC";
+                  const lightMuted = "rgba(243,241,236,0.75)";
                   return (
                     <div
                       key={d.key}
@@ -838,11 +1000,11 @@ function CalendarView({ trades, filterMarkets, strategies }) {
                       style={{ background: hasData ? heatColor(d.pnl, monthMaxAbs) : undefined }}
                       title={hasData ? `${d.key} · ${d.count} trade${d.count === 1 ? "" : "s"} · ${money(d.pnl)}` : d.key}
                     >
-                      <span className="fj-cal-daynum" style={hasData ? { color: darkMuted } : undefined}>{d.dayNum}</span>
+                      <span className="fj-cal-daynum" style={hasData ? { color: lightMuted } : undefined}>{d.dayNum}</span>
                       {hasData && (
                         <>
-                          <span className="fj-cal-cell-pnl" style={{ color: darkText }}>{money(d.pnl)}</span>
-                          <span className="fj-cal-cell-count" style={{ color: darkMuted }}>{d.count} trade{d.count === 1 ? "" : "s"}</span>
+                          <span className="fj-cal-cell-pnl" style={{ color: lightText }}>{money(d.pnl)}</span>
+                          <span className="fj-cal-cell-count" style={{ color: lightMuted }}>{d.count} trade{d.count === 1 ? "" : "s"}</span>
                         </>
                       )}
                     </div>
