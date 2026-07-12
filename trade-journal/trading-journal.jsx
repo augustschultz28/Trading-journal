@@ -46,6 +46,36 @@ function fmtDate(d) {
 
 const MONTH_LABELS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
 
+function buildMonthGrid(year, month, byDate, maxAbsOverride) {
+  const gridStart = new Date(year, month, 1);
+  gridStart.setDate(gridStart.getDate() - gridStart.getDay());
+  const lastOfMonth = new Date(year, month + 1, 0);
+  const gridEnd = new Date(lastOfMonth);
+  gridEnd.setDate(gridEnd.getDate() + (6 - gridEnd.getDay()));
+
+  const days = [];
+  const c = new Date(gridStart);
+  while (c <= gridEnd) {
+    const key = fmtDate(c);
+    days.push({
+      key,
+      dayNum: c.getDate(),
+      inMonth: c.getMonth() === month,
+      ...(byDate[key] || { pnl: 0, count: 0 }),
+    });
+    c.setDate(c.getDate() + 1);
+  }
+  const weeks = [];
+  for (let i = 0; i < days.length; i += 7) weeks.push(days.slice(i, i + 7));
+
+  const monthDays = days.filter((d) => d.inMonth);
+  const monthTotal = monthDays.reduce((s, d) => s + d.pnl, 0);
+  const monthCount = monthDays.reduce((s, d) => s + d.count, 0);
+  const maxAbs = maxAbsOverride ?? Math.max(1, ...days.map((d) => Math.abs(d.pnl)));
+
+  return { weeks, monthTotal, monthCount, maxAbs };
+}
+
 const money = (n) => {
   const v = Number(n) || 0;
   const sign = v < 0 ? "-" : "";
@@ -186,20 +216,28 @@ export default function TradingJournal() {
   const curve = useMemo(() => equityCurve(filteredTrades), [filteredTrades]);
 
   const byMarket = useMemo(() => {
-    return MARKET_ORDER.map((m) => ({
-      key: m,
-      ...settings[m],
-      stats: calcStats(trades.filter((t) => t.market === m)),
-      curve: equityCurve(trades.filter((t) => t.market === m)),
-    }));
+    return MARKET_ORDER.map((m) => {
+      const marketTrades = trades.filter((t) => t.market === m);
+      return {
+        key: m,
+        ...settings[m],
+        stats: calcStats(marketTrades),
+        curve: equityCurve(marketTrades),
+        trades: marketTrades,
+      };
+    });
   }, [trades, settings]);
 
   const byStrategy = useMemo(() => {
-    return strategies.map((s) => ({
-      key: s,
-      stats: calcStats(trades.filter((t) => t.strategy === s)),
-      curve: equityCurve(trades.filter((t) => t.strategy === s)),
-    })).sort((a, b) => b.stats.totalPnl - a.stats.totalPnl);
+    return strategies.map((s) => {
+      const strategyTrades = trades.filter((t) => t.strategy === s);
+      return {
+        key: s,
+        stats: calcStats(strategyTrades),
+        curve: equityCurve(strategyTrades),
+        trades: strategyTrades,
+      };
+    }).sort((a, b) => b.stats.totalPnl - a.stats.totalPnl);
   }, [strategies, trades]);
 
   const resetFilters = () => {
@@ -427,6 +465,21 @@ export default function TradingJournal() {
         .fj-cal-weektotal-label { font-size:9.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.4px; }
         .fj-cal-weektotal-val { font-family:'JetBrains Mono',monospace; font-size:13px; font-weight:700; }
 
+        .fj-seg-toggle { display:flex; border:1px solid var(--border); border-radius:7px; overflow:hidden; margin-left:4px; }
+        .fj-seg-btn { background:var(--panel-alt); color:var(--text-dim); border:none; padding:6px 12px; font-size:12.5px; cursor:pointer; font-family:'Inter',sans-serif; }
+        .fj-seg-btn + .fj-seg-btn { border-left:1px solid var(--border); }
+        .fj-seg-btn.active { background:var(--amber); color:#1B1E24; font-weight:600; }
+
+        .fj-year-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap:12px; margin-top:14px; }
+        .fj-year-month-card { background:var(--panel-alt); border:1px solid var(--border); border-radius:9px; padding:12px; cursor:pointer; transition:border-color .15s, transform .1s; }
+        .fj-year-month-card:hover { border-color: var(--amber); transform: translateY(-1px); }
+        .fj-year-month-head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:9px; }
+        .fj-year-month-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:13.5px; letter-spacing:0.3px; }
+        .fj-year-month-pnl { font-family:'JetBrains Mono',monospace; font-size:12px; font-weight:600; }
+        .fj-mini-grid { display:flex; gap:3px; }
+        .fj-mini-week { display:flex; flex-direction:column; gap:3px; }
+        .fj-mini-day { width:14px; height:14px; border-radius:3px; }
+
         .fj-empty { color:var(--text-dim); font-size:13px; text-align:center; padding:30px 10px; }
 
 
@@ -526,7 +579,7 @@ export default function TradingJournal() {
       {view === "strategy" && <GroupCards groups={byStrategy} emptyLabel="No strategies logged yet." />}
       {view === "market" && (
         <GroupCards
-          groups={byMarket.map((m) => ({ key: `${m.key} — ${m.label}`, stats: m.stats, curve: m.curve, accent: m.accent }))}
+          groups={byMarket.map((m) => ({ key: `${m.key} — ${m.label}`, stats: m.stats, curve: m.curve, accent: m.accent, trades: m.trades }))}
           emptyLabel="No trades logged yet."
         />
       )}
@@ -814,19 +867,21 @@ function GroupCards({ groups, emptyLabel }) {
       {groups.map((g) => {
         const isOpen = expanded === g.key;
         const isProfit = g.stats.totalPnl >= 0;
+        const hasTrades = g.stats.n > 0;
         return (
           <div key={g.key} className="fj-strat-card">
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div className="fj-strat-name">{g.key}</div>
-              <button className="fj-iconbtn" onClick={() => setExpanded(isOpen ? null : g.key)}>
+              <button className="fj-iconbtn" onClick={() => setExpanded(isOpen ? null : g.key)} title="More stats">
                 {isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
               </button>
             </div>
-            <div className="fj-strat-row"><span>Total P&amp;L</span><b className={isProfit ? "fj-profit" : "fj-loss"}>{g.stats.n ? money(g.stats.totalPnl) : "—"}</b></div>
+            <div className="fj-strat-row"><span>Total P&amp;L</span><b className={isProfit ? "fj-profit" : "fj-loss"}>{hasTrades ? money(g.stats.totalPnl) : "—"}</b></div>
             <div className="fj-strat-row"><span>Trades</span><b>{g.stats.n}</b></div>
-            <div className="fj-strat-row"><span>Win rate</span><b>{g.stats.n ? pct(g.stats.winRate) : "—"}</b></div>
+            <div className="fj-strat-row"><span>Win rate</span><b>{hasTrades ? pct(g.stats.winRate) : "—"}</b></div>
             <div className="fj-strat-row"><span>Profit factor</span><b>{g.stats.profitFactor === null ? "—" : g.stats.profitFactor === Infinity ? "∞" : g.stats.profitFactor.toFixed(2)}</b></div>
-            <div className="fj-strat-row"><span>Expectancy</span><b className={g.stats.expectancy >= 0 ? "fj-profit" : "fj-loss"}>{g.stats.n ? money(g.stats.expectancy) : "—"}</b></div>
+            <div className="fj-strat-row"><span>Expectancy</span><b className={g.stats.expectancy >= 0 ? "fj-profit" : "fj-loss"}>{hasTrades ? money(g.stats.expectancy) : "—"}</b></div>
+
             {isOpen && (
               <div style={{ marginTop: 10 }}>
                 <div className="fj-strat-row"><span>Avg win</span><b className="fj-profit">{money(g.stats.avgWin)}</b></div>
@@ -834,8 +889,21 @@ function GroupCards({ groups, emptyLabel }) {
                 <div className="fj-strat-row"><span>Largest win</span><b className="fj-profit">{money(g.stats.largestWin)}</b></div>
                 <div className="fj-strat-row"><span>Largest loss</span><b className="fj-loss">{money(g.stats.largestLoss)}</b></div>
                 <div className="fj-strat-row"><span>Max drawdown</span><b className="fj-loss">{money(-g.stats.maxDD)}</b></div>
-                <div style={{ marginTop: 10 }}><EquityChart curve={g.curve} color={g.accent || "#D9A441"} /></div>
               </div>
+            )}
+
+            {hasTrades ? (
+              <>
+                <div style={{ marginTop: 12 }}>
+                  <EquityChart curve={g.curve} color={g.accent || "#D9A441"} />
+                </div>
+                <div style={{ marginTop: 10 }}>
+                  <div className="fj-stat-label" style={{ marginBottom: 6 }}>Daily &amp; weekly P&amp;L</div>
+                  <CalendarHeatmap trades={g.trades} />
+                </div>
+              </>
+            ) : (
+              <div className="fj-empty" style={{ padding: "16px 0" }}>No trades yet.</div>
             )}
           </div>
         );
@@ -889,6 +957,7 @@ function CalendarView({ trades, filterMarkets, strategies }) {
   const today = new Date();
   const [cursor, setCursor] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [selectedStrategy, setSelectedStrategy] = useState("ALL");
+  const [mode, setMode] = useState("month"); // "month" | "year"
 
   const marketFiltered = useMemo(
     () => trades.filter((t) => filterMarkets.length === 0 || filterMarkets.includes(t.market)),
@@ -912,35 +981,33 @@ function CalendarView({ trades, filterMarkets, strategies }) {
   const year = cursor.getFullYear();
   const month = cursor.getMonth();
 
-  const gridStart = new Date(year, month, 1);
-  gridStart.setDate(gridStart.getDate() - gridStart.getDay());
-  const lastOfMonth = new Date(year, month + 1, 0);
-  const gridEnd = new Date(lastOfMonth);
-  gridEnd.setDate(gridEnd.getDate() + (6 - gridEnd.getDay()));
+  const { weeks, monthTotal, monthCount, maxAbs: monthMaxAbs } = useMemo(
+    () => buildMonthGrid(year, month, byDate),
+    [year, month, byDate]
+  );
 
-  const days = [];
-  const c = new Date(gridStart);
-  while (c <= gridEnd) {
-    const key = fmtDate(c);
-    days.push({
-      key,
-      dayNum: c.getDate(),
-      inMonth: c.getMonth() === month,
-      ...(byDate[key] || { pnl: 0, count: 0 }),
+  const yearMaxAbs = useMemo(() => {
+    let max = 1;
+    Object.entries(byDate).forEach(([date, d]) => {
+      if (date.slice(0, 4) === String(year)) max = Math.max(max, Math.abs(d.pnl));
     });
-    c.setDate(c.getDate() + 1);
-  }
-  const weeks = [];
-  for (let i = 0; i < days.length; i += 7) weeks.push(days.slice(i, i + 7));
+    return max;
+  }, [byDate, year]);
 
-  const monthDays = days.filter((d) => d.inMonth);
-  const monthTotal = monthDays.reduce((s, d) => s + d.pnl, 0);
-  const monthCount = monthDays.reduce((s, d) => s + d.count, 0);
-  const monthMaxAbs = Math.max(1, ...days.map((d) => Math.abs(d.pnl)));
+  const yearTotal = useMemo(() => {
+    let pnl = 0, count = 0;
+    Object.entries(byDate).forEach(([date, d]) => {
+      if (date.slice(0, 4) === String(year)) { pnl += d.pnl; count += d.count; }
+    });
+    return { pnl, count };
+  }, [byDate, year]);
 
   const goPrev = () => setCursor(new Date(year, month - 1, 1));
   const goNext = () => setCursor(new Date(year, month + 1, 1));
   const goToday = () => setCursor(new Date(today.getFullYear(), today.getMonth(), 1));
+  const goPrevYear = () => setCursor(new Date(year - 1, month, 1));
+  const goNextYear = () => setCursor(new Date(year + 1, month, 1));
+  const jumpToMonth = (m) => { setCursor(new Date(year, m, 1)); setMode("month"); };
 
   return (
     <div>
@@ -963,61 +1030,111 @@ function CalendarView({ trades, filterMarkets, strategies }) {
       <div className="fj-panel">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12 }}>
           <div className="fj-cal-nav">
-            <button className="fj-iconbtn" onClick={goPrev}>◀</button>
-            <span className="fj-cal-month-label">{MONTH_LABELS[month]} {year}</span>
-            <button className="fj-iconbtn" onClick={goNext}>▶</button>
-            <button className="fj-btn" style={{ padding: "5px 10px" }} onClick={goToday}>Today</button>
+            {mode === "month" ? (
+              <>
+                <button className="fj-iconbtn" onClick={goPrev}>◀</button>
+                <span className="fj-cal-month-label">{MONTH_LABELS[month]} {year}</span>
+                <button className="fj-iconbtn" onClick={goNext}>▶</button>
+                <button className="fj-btn" style={{ padding: "5px 10px" }} onClick={goToday}>Today</button>
+              </>
+            ) : (
+              <>
+                <button className="fj-iconbtn" onClick={goPrevYear}>◀</button>
+                <span className="fj-cal-month-label">{year}</span>
+                <button className="fj-iconbtn" onClick={goNextYear}>▶</button>
+                <button className="fj-btn" style={{ padding: "5px 10px" }} onClick={goToday}>This year</button>
+              </>
+            )}
+            <div className="fj-seg-toggle">
+              <button className={`fj-seg-btn ${mode === "month" ? "active" : ""}`} onClick={() => setMode("month")}>Month</button>
+              <button className={`fj-seg-btn ${mode === "year" ? "active" : ""}`} onClick={() => setMode("year")}>Year</button>
+            </div>
           </div>
           <div style={{ display: "flex", gap: 18 }}>
             <div>
-              <div className="fj-stat-label">Month P&amp;L</div>
-              <div className={`fj-stat-value ${monthTotal >= 0 ? "fj-profit" : "fj-loss"}`}>{monthCount ? money(monthTotal) : "—"}</div>
+              <div className="fj-stat-label">{mode === "month" ? "Month P&L" : "Year P&L"}</div>
+              <div className={`fj-stat-value ${(mode === "month" ? monthTotal : yearTotal.pnl) >= 0 ? "fj-profit" : "fj-loss"}`}>
+                {(mode === "month" ? monthCount : yearTotal.count) ? money(mode === "month" ? monthTotal : yearTotal.pnl) : "—"}
+              </div>
             </div>
             <div>
               <div className="fj-stat-label">Trades</div>
-              <div className="fj-stat-value">{monthCount}</div>
+              <div className="fj-stat-value">{mode === "month" ? monthCount : yearTotal.count}</div>
             </div>
           </div>
         </div>
 
-        <div className="fj-cal-grid">
-          {DOW_LABELS.map((l) => <div key={l} className="fj-cal-headcell">{l}</div>)}
-          <div className="fj-cal-headcell">Week</div>
+        {mode === "month" ? (
+          <div className="fj-cal-grid">
+            {DOW_LABELS.map((l) => <div key={l} className="fj-cal-headcell">{l}</div>)}
+            <div className="fj-cal-headcell">Week</div>
 
-          {weeks.map((week, wi) => {
-            const weekTotal = week.reduce((s, d) => s + d.pnl, 0);
-            const weekCount = week.reduce((s, d) => s + d.count, 0);
-            return (
-              <React.Fragment key={wi}>
-                {week.map((d) => {
-                  const hasData = d.count > 0;
-                  const lightText = "#F3F1EC";
-                  const lightMuted = "rgba(243,241,236,0.75)";
-                  return (
-                    <div
-                      key={d.key}
-                      className={`fj-cal-cell ${d.inMonth ? "" : "pad"}`}
-                      style={{ background: hasData ? heatColor(d.pnl, monthMaxAbs) : undefined }}
-                      title={hasData ? `${d.key} · ${d.count} trade${d.count === 1 ? "" : "s"} · ${money(d.pnl)}` : d.key}
-                    >
-                      <span className="fj-cal-daynum" style={hasData ? { color: lightMuted } : undefined}>{d.dayNum}</span>
-                      {hasData && (
-                        <>
-                          <span className="fj-cal-cell-pnl" style={{ color: lightText }}>{money(d.pnl)}</span>
-                          <span className="fj-cal-cell-count" style={{ color: lightMuted }}>{d.count} trade{d.count === 1 ? "" : "s"}</span>
-                        </>
-                      )}
-                    </div>
-                  );
-                })}
-                <div className="fj-cal-weektotal">
-                  <span className="fj-cal-weektotal-label">Week {wi + 1}</span>
-                  <span className={`fj-cal-weektotal-val ${weekTotal >= 0 ? "fj-profit" : "fj-loss"}`}>{weekCount ? money(weekTotal) : "—"}</span>
+            {weeks.map((week, wi) => {
+              const weekTotal = week.reduce((s, d) => s + d.pnl, 0);
+              const weekCount = week.reduce((s, d) => s + d.count, 0);
+              return (
+                <React.Fragment key={wi}>
+                  {week.map((d) => {
+                    const hasData = d.count > 0;
+                    const lightText = "#F3F1EC";
+                    const lightMuted = "rgba(243,241,236,0.75)";
+                    return (
+                      <div
+                        key={d.key}
+                        className={`fj-cal-cell ${d.inMonth ? "" : "pad"}`}
+                        style={{ background: hasData ? heatColor(d.pnl, monthMaxAbs) : undefined }}
+                        title={hasData ? `${d.key} · ${d.count} trade${d.count === 1 ? "" : "s"} · ${money(d.pnl)}` : d.key}
+                      >
+                        <span className="fj-cal-daynum" style={hasData ? { color: lightMuted } : undefined}>{d.dayNum}</span>
+                        {hasData && (
+                          <>
+                            <span className="fj-cal-cell-pnl" style={{ color: lightText }}>{money(d.pnl)}</span>
+                            <span className="fj-cal-cell-count" style={{ color: lightMuted }}>{d.count} trade{d.count === 1 ? "" : "s"}</span>
+                          </>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <div className="fj-cal-weektotal">
+                    <span className="fj-cal-weektotal-label">Week {wi + 1}</span>
+                    <span className={`fj-cal-weektotal-val ${weekTotal >= 0 ? "fj-profit" : "fj-loss"}`}>{weekCount ? money(weekTotal) : "—"}</span>
+                  </div>
+                </React.Fragment>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="fj-year-grid">
+            {Array.from({ length: 12 }, (_, m) => m).map((m) => {
+              const g = buildMonthGrid(year, m, byDate, yearMaxAbs);
+              return (
+                <div key={m} className="fj-year-month-card" onClick={() => jumpToMonth(m)} title={`Open ${MONTH_LABELS[m]} ${year}`}>
+                  <div className="fj-year-month-head">
+                    <span className="fj-year-month-name">{MONTH_LABELS[m].slice(0, 3)}</span>
+                    <span className={`fj-year-month-pnl ${g.monthCount ? (g.monthTotal >= 0 ? "fj-profit" : "fj-loss") : "fj-neutral"}`}>
+                      {g.monthCount ? money(g.monthTotal) : "—"}
+                    </span>
+                  </div>
+                  <div className="fj-mini-grid">
+                    {g.weeks.map((week, wi) => (
+                      <div key={wi} className="fj-mini-week">
+                        {week.map((d) => (
+                          <div
+                            key={d.key}
+                            className="fj-mini-day"
+                            title={d.count ? `${d.key} · ${money(d.pnl)}` : d.key}
+                            style={{ background: d.inMonth ? (d.count ? heatColor(d.pnl, yearMaxAbs) : "rgba(139,146,158,0.10)") : "transparent" }}
+                          />
+                        ))}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="fj-sub" style={{ marginTop: 7, fontSize: 10.5 }}>{g.monthCount} trade{g.monthCount === 1 ? "" : "s"}</div>
                 </div>
-              </React.Fragment>
-            );
-          })}
-        </div>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );
