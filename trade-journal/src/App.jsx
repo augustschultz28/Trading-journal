@@ -8,13 +8,12 @@ import Papa from "papaparse";
 
 // ---------- constants ----------
 
-const MARKET_ORDER = ["MES", "MNQ", "MCL", "MGC"];
-
 const DEFAULT_SETTINGS = {
   MES: { label: "Micro E-mini S&P 500", multiplier: 5, accent: "#6C93AD" },
   MNQ: { label: "Micro E-mini Nasdaq-100", multiplier: 2, accent: "#9385C9" },
   MCL: { label: "Micro WTI Crude Oil", multiplier: 100, accent: "#D9A441" },
   MGC: { label: "Micro Gold", multiplier: 10, accent: "#C7B15A" },
+  M2K: { label: "Micro Russell 2000", multiplier: 5, accent: "#7FAE8E" },
 };
 
 const TRADES_KEY = "futures_journal_trades_v1";
@@ -144,6 +143,36 @@ function equityCurve(trades) {
   return points;
 }
 
+// Builds one merged dataset for the portfolio chart: a "portfolio" series plus
+// one series per strategy, all sharing the same x-axis (trade sequence).
+// Each strategy's value carries forward (stays flat) between its own trades,
+// so every line is defined at every point even though strategies don't trade
+// on the same days.
+function buildMultiEquityCurve(trades, strategyList) {
+  if (!trades || trades.length === 0) return [];
+  const sorted = [...trades].sort(
+    (a, b) => new Date(`${a.date}T${a.time || "00:00"}`) - new Date(`${b.date}T${b.time || "00:00"}`)
+  );
+  let portfolioEq = 0;
+  const stratEq = {};
+  strategyList.forEach((s) => { stratEq[s] = 0; });
+
+  const firstRow = { i: 0, date: sorted[0].date, portfolio: 0 };
+  strategyList.forEach((s) => { firstRow[s] = 0; });
+  const rows = [firstRow];
+
+  sorted.forEach((t, idx) => {
+    portfolioEq += t.pnl;
+    if (t.strategy && Object.prototype.hasOwnProperty.call(stratEq, t.strategy)) {
+      stratEq[t.strategy] += t.pnl;
+    }
+    const row = { i: idx + 1, date: t.date, portfolio: Number(portfolioEq.toFixed(2)) };
+    strategyList.forEach((s) => { row[s] = Number(stratEq[s].toFixed(2)); });
+    rows.push(row);
+  });
+  return rows;
+}
+
 // ---------- storage ----------
 
 async function loadJSON(key, fallback) {
@@ -216,7 +245,7 @@ export default function TradingJournal() {
   const curve = useMemo(() => equityCurve(filteredTrades), [filteredTrades]);
 
   const byMarket = useMemo(() => {
-    return MARKET_ORDER.map((m) => {
+    return Object.keys(settings).map((m) => {
       const marketTrades = trades.filter((t) => t.market === m);
       return {
         key: m,
@@ -574,7 +603,7 @@ export default function TradingJournal() {
       )}
 
       {view === "portfolio" && (
-        <PortfolioView stats={portfolioStats} curve={curve} byMarket={byMarket} byStrategy={byStrategy} settings={settings} />
+        <PortfolioView stats={portfolioStats} curve={curve} byMarket={byMarket} byStrategy={byStrategy} settings={settings} trades={filteredTrades} strategies={strategies} />
       )}
       {view === "strategy" && <GroupCards groups={byStrategy} emptyLabel="No strategies logged yet." />}
       {view === "market" && (
@@ -667,17 +696,56 @@ function ImportPreviewModal({ preview, existingCount, onAppend, onReplace, onCan
 }
 
 
+const ACCENT_PALETTE = ["#6C93AD", "#9385C9", "#D9A441", "#C7B15A", "#7FAE8E", "#B87F9E", "#8AA3C2", "#C0895F"];
+
 function SettingsPanel({ settings, setSettings, onClose }) {
+  const [newSymbol, setNewSymbol] = useState("");
+  const [newLabel, setNewLabel] = useState("");
+  const [newMultiplier, setNewMultiplier] = useState("");
+  const [error, setError] = useState("");
+
+  const markets = Object.keys(settings);
+
+  const addMarket = (e) => {
+    e.preventDefault();
+    const sym = newSymbol.trim().toUpperCase();
+    if (!sym) { setError("Enter a symbol, e.g. M2K."); return; }
+    if (settings[sym]) { setError(`${sym} is already in your market list.`); return; }
+    const accent = ACCENT_PALETTE[markets.length % ACCENT_PALETTE.length];
+    setSettings((s) => ({
+      ...s,
+      [sym]: { label: newLabel.trim() || sym, multiplier: Number(newMultiplier) || 1, accent },
+    }));
+    setNewSymbol(""); setNewLabel(""); setNewMultiplier(""); setError("");
+  };
+
+  const removeMarket = (sym) => {
+    setSettings((s) => {
+      const copy = { ...s };
+      delete copy[sym];
+      return copy;
+    });
+  };
+
   return (
     <div className="fj-panel">
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-        <p className="fj-panel-title" style={{ margin: 0 }}>Point value per contract ($/point) — used by the P&amp;L calculator</p>
+        <p className="fj-panel-title" style={{ margin: 0 }}>Markets &amp; point values ($/point) — used by the P&amp;L calculator</p>
         <button className="fj-iconbtn" onClick={onClose}><X size={16} /></button>
       </div>
-      <div className="fj-form-row" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px,1fr))" }}>
-        {MARKET_ORDER.map((m) => (
+
+      <div className="fj-form-row" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(170px,1fr))" }}>
+        {markets.map((m) => (
           <div key={m} className="fj-form-field">
-            <label>{m} — {settings[m].label}</label>
+            <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>{m} — {settings[m].label}</span>
+              <button
+                type="button" className="fj-iconbtn" style={{ padding: 2 }}
+                onClick={() => removeMarket(m)} title={`Remove ${m}`}
+              >
+                <Trash2 size={12} />
+              </button>
+            </label>
             <input
               type="number" step="0.01" className="fj-input"
               value={settings[m].multiplier}
@@ -686,9 +754,27 @@ function SettingsPanel({ settings, setSettings, onClose }) {
           </div>
         ))}
       </div>
-      <div className="fj-sub" style={{ marginTop: 8 }}>
-        These only affect the optional entry/exit calculator in the trade form — P&amp;L is always stored as a plain number you can edit directly.
+
+      <div className="fj-sub" style={{ margin: "10px 0" }}>
+        These only affect the optional entry/exit calculator in the trade form — P&amp;L is always stored as a plain number you can edit directly. Removing a market keeps any trades already logged under it in your journal, but hides it from the ticker strip and By Market breakdown.
       </div>
+
+      <form onSubmit={addMarket} className="fj-form-row" style={{ gridTemplateColumns: "90px 1fr 110px auto", alignItems: "end", marginBottom: 0 }}>
+        <div className="fj-form-field">
+          <label>Symbol</label>
+          <input className="fj-input" placeholder="M2K" value={newSymbol} onChange={(e) => setNewSymbol(e.target.value)} />
+        </div>
+        <div className="fj-form-field">
+          <label>Name</label>
+          <input className="fj-input" style={{ fontFamily: "Inter, sans-serif" }} placeholder="Micro Russell 2000" value={newLabel} onChange={(e) => setNewLabel(e.target.value)} />
+        </div>
+        <div className="fj-form-field">
+          <label>$/point</label>
+          <input type="number" step="0.01" className="fj-input" placeholder="5" value={newMultiplier} onChange={(e) => setNewMultiplier(e.target.value)} />
+        </div>
+        <button type="submit" className="fj-btn primary" style={{ height: 37 }}><Plus size={14} /> Add market</button>
+      </form>
+      {error && <div className="fj-loss" style={{ fontSize: 12, marginTop: 6 }}>{error}</div>}
     </div>
   );
 }
@@ -797,16 +883,70 @@ function EquityChart({ curve, color = "#D9A441" }) {
   );
 }
 
+function PortfolioEquityChart({ data, strategies, visible, colorFor }) {
+  if (!data || data.length === 0) {
+    return <div className="fj-empty">No trades yet — add one to start the equity curve.</div>;
+  }
+  return (
+    <ResponsiveContainer width="100%" height={260}>
+      <LineChart data={data} margin={{ top: 8, right: 12, left: -10, bottom: 0 }}>
+        <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
+        <XAxis dataKey="i" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+        <YAxis stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+        <ReferenceLine y={0} stroke="#3A4150" />
+        <Tooltip
+          contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+          labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
+          itemStyle={{ color: "#E7E5E0" }}
+          formatter={(v, name) => [money(v), name === "portfolio" ? "Portfolio" : name]}
+          labelFormatter={(i) => `Trade #${i}`}
+        />
+        {strategies.filter((s) => visible.includes(s)).map((s) => (
+          <Line key={s} type="monotone" dataKey={s} stroke={colorFor(s)} strokeWidth={1.5} strokeOpacity={0.5} dot={false} isAnimationActive={false} />
+        ))}
+        <Line type="monotone" dataKey="portfolio" stroke="#D9A441" strokeWidth={2.5} dot={false} isAnimationActive={false} />
+      </LineChart>
+    </ResponsiveContainer>
+  );
+}
+
 // ---------- portfolio view ----------
 
-function PortfolioView({ stats, curve, byMarket, byStrategy, settings }) {
+function PortfolioView({ stats, byMarket, byStrategy, settings, trades, strategies }) {
   const barData = byMarket.map((m) => ({ name: m.key, pnl: m.stats.totalPnl, fill: m.accent }));
+  const [visibleStrategies, setVisibleStrategies] = useState([]);
+  const multiCurve = useMemo(() => buildMultiEquityCurve(trades, strategies), [trades, strategies]);
+  const colorFor = (s) => ACCENT_PALETTE[strategies.indexOf(s) % ACCENT_PALETTE.length];
+  const toggleStrategy = (s) => setVisibleStrategies((v) => v.includes(s) ? v.filter((x) => x !== s) : [...v, s]);
+
   return (
     <div>
       <StatGrid stats={stats} />
       <div className="fj-panel">
         <p className="fj-panel-title">Equity curve</p>
-        <EquityChart curve={curve} />
+        {strategies.length > 0 && (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 10 }}>
+            <span className="fj-sub" style={{ marginRight: 2 }}>Overlay strategies:</span>
+            {strategies.map((s) => {
+              const active = visibleStrategies.includes(s);
+              const c = colorFor(s);
+              return (
+                <span
+                  key={s}
+                  className="fj-chip"
+                  style={active ? { background: c, borderColor: c, color: "#14161B", fontWeight: 600 } : undefined}
+                  onClick={() => toggleStrategy(s)}
+                >
+                  {s}
+                </span>
+              );
+            })}
+            {visibleStrategies.length > 0 && (
+              <span className="fj-chip" onClick={() => setVisibleStrategies([])}>Clear</span>
+            )}
+          </div>
+        )}
+        <PortfolioEquityChart data={multiCurve} strategies={strategies} visible={visibleStrategies} colorFor={colorFor} />
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: 14 }}>
         <div className="fj-panel">
@@ -1177,7 +1317,7 @@ function HeatmapsView({ trades, settings }) {
 
 function TradeSequenceHeatmap({ trades, settings }) {
   const maxAbs = Math.max(1, ...trades.map((t) => Math.abs(t.pnl)));
-  const rows = MARKET_ORDER.map((m) => {
+  const rows = Object.keys(settings).map((m) => {
     const marketTrades = trades
       .filter((t) => t.market === m)
       .sort((a, b) => new Date(`${a.date}T${a.time || "00:00"}`) - new Date(`${b.date}T${b.time || "00:00"}`));
@@ -1386,7 +1526,7 @@ function TradeForm({ initial, strategies, settings, onCancel, onSave }) {
             <div className="fj-form-field">
               <label>Market</label>
               <select className="fj-select" value={market} onChange={(e) => setMarket(e.target.value)}>
-                {MARKET_ORDER.map((m) => <option key={m} value={m}>{m} — {settings[m].label}</option>)}
+                {Object.keys(settings).map((m) => <option key={m} value={m}>{m} — {settings[m].label}</option>)}
               </select>
             </div>
             <div className="fj-form-field">
