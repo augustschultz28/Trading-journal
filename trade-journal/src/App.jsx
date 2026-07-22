@@ -18,6 +18,7 @@ const DEFAULT_SETTINGS = {
 
 const TRADES_KEY = "futures_journal_trades_v1";
 const SETTINGS_KEY = "futures_journal_settings_v1";
+const ACCOUNTS_KEY = "futures_journal_accounts_v1";
 
 const uid = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
@@ -198,14 +199,16 @@ export default function TradingJournal() {
   const [ready, setReady] = useState(false);
   const [trades, setTrades] = useState([]);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
+  const [accounts, setAccounts] = useState([]);
 
-  const [view, setView] = useState("portfolio"); // portfolio | strategy | market | log
+  const [view, setView] = useState("portfolio"); // portfolio | strategy | market | calendar | heatmaps | accounts | log
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
 
   const [filterMarkets, setFilterMarkets] = useState([]); // empty = all
   const [filterStrategies, setFilterStrategies] = useState([]);
+  const [filterAccounts, setFilterAccounts] = useState([]);
   const [dateFrom, setDateFrom] = useState("");
   const [dateTo, setDateTo] = useState("");
   const [importPreview, setImportPreview] = useState(null); // { parsed, errorCount, total }
@@ -213,18 +216,21 @@ export default function TradingJournal() {
 
   useEffect(() => {
     (async () => {
-      const [t, s] = await Promise.all([
+      const [t, s, a] = await Promise.all([
         loadJSON(TRADES_KEY, []),
         loadJSON(SETTINGS_KEY, DEFAULT_SETTINGS),
+        loadJSON(ACCOUNTS_KEY, []),
       ]);
       setTrades(t);
       setSettings({ ...DEFAULT_SETTINGS, ...s });
+      setAccounts(a);
       setReady(true);
     })();
   }, []);
 
   useEffect(() => { if (ready) saveJSON(TRADES_KEY, trades); }, [trades, ready]);
   useEffect(() => { if (ready) saveJSON(SETTINGS_KEY, settings); }, [settings, ready]);
+  useEffect(() => { if (ready) saveJSON(ACCOUNTS_KEY, accounts); }, [accounts, ready]);
 
   const strategies = useMemo(
     () => Array.from(new Set(trades.map((t) => t.strategy).filter(Boolean))).sort(),
@@ -235,11 +241,12 @@ export default function TradingJournal() {
     return trades.filter((t) => {
       if (filterMarkets.length && !filterMarkets.includes(t.market)) return false;
       if (filterStrategies.length && !filterStrategies.includes(t.strategy)) return false;
+      if (filterAccounts.length && !(t.accounts || []).some((a) => filterAccounts.includes(a))) return false;
       if (dateFrom && t.date < dateFrom) return false;
       if (dateTo && t.date > dateTo) return false;
       return true;
     });
-  }, [trades, filterMarkets, filterStrategies, dateFrom, dateTo]);
+  }, [trades, filterMarkets, filterStrategies, filterAccounts, dateFrom, dateTo]);
 
   const portfolioStats = useMemo(() => calcStats(filteredTrades), [filteredTrades]);
   const curve = useMemo(() => equityCurve(filteredTrades), [filteredTrades]);
@@ -270,7 +277,7 @@ export default function TradingJournal() {
   }, [strategies, trades]);
 
   const resetFilters = () => {
-    setFilterMarkets([]); setFilterStrategies([]); setDateFrom(""); setDateTo("");
+    setFilterMarkets([]); setFilterStrategies([]); setFilterAccounts([]); setDateFrom(""); setDateTo("");
   };
 
   const toggleMarketFilter = (m) => {
@@ -278,6 +285,9 @@ export default function TradingJournal() {
   };
   const toggleStrategyFilter = (s) => {
     setFilterStrategies((prev) => prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]);
+  };
+  const toggleAccountFilter = (a) => {
+    setFilterAccounts((prev) => prev.includes(a) ? prev.filter((x) => x !== a) : [...prev, a]);
   };
 
   const handleSave = (trade) => {
@@ -298,6 +308,7 @@ export default function TradingJournal() {
       time: t.time || "",
       market: t.market,
       strategy: t.strategy || "",
+      accounts: (t.accounts || []).join("; "),
       direction: t.direction,
       contracts: t.contracts,
       entry: t.entry ?? "",
@@ -349,6 +360,7 @@ export default function TradingJournal() {
         time: (row.time || "").toString().trim(),
         market: marketRaw || "MES",
         strategy: (row.strategy || "").toString().trim(),
+        accounts: (row.accounts || "").toString().split(";").map((s) => s.trim()).filter(Boolean),
         direction,
         contracts,
         entry: Number.isFinite(entryVal) ? entryVal : null,
@@ -509,7 +521,24 @@ export default function TradingJournal() {
         .fj-mini-week { display:flex; flex-direction:column; gap:3px; }
         .fj-mini-day { width:14px; height:14px; border-radius:3px; }
 
+        .fj-acct-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap:14px; }
+        .fj-acct-card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; }
+        .fj-acct-head { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px; }
+        .fj-acct-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:15px; }
+        .fj-badge { font-size:10.5px; text-transform:uppercase; letter-spacing:0.5px; font-weight:700; padding:3px 8px; border-radius:20px; display:inline-block; margin-top:4px; }
+        .fj-badge.eval { background:rgba(217,164,65,0.18); color:var(--amber); border:1px solid rgba(217,164,65,0.4); }
+        .fj-badge.passed { background:rgba(95,163,122,0.18); color:var(--profit); border:1px solid rgba(95,163,122,0.4); }
+        .fj-badge.failed { background:rgba(194,99,74,0.18); color:var(--loss); border:1px solid rgba(194,99,74,0.4); }
+        .fj-badge.cash { background:rgba(139,146,158,0.15); color:var(--text-dim); border:1px solid rgba(139,146,158,0.35); }
+        .fj-acct-row { display:flex; justify-content:space-between; font-size:12.5px; color:var(--text-dim); padding:3px 0; }
+        .fj-acct-row b { color: var(--text); font-family:'JetBrains Mono',monospace; font-weight:500; }
+        .fj-acct-updateform { display:flex; gap:6px; align-items:flex-end; margin:12px 0 4px; }
+        .fj-acct-history { max-height:140px; overflow-y:auto; margin-top:8px; }
+        .fj-acct-history-row { display:flex; justify-content:space-between; align-items:center; font-size:11.5px; font-family:'JetBrains Mono',monospace; padding:4px 2px; border-bottom:1px solid var(--border); color:var(--text-dim); }
+        .fj-acct-history-row b { color:var(--text); font-weight:500; }
+
         .fj-empty { color:var(--text-dim); font-size:13px; text-align:center; padding:30px 10px; }
+
 
 
         .fj-modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,0.55); display:flex; align-items:center;
@@ -582,6 +611,7 @@ export default function TradingJournal() {
           ["market", "By Market"],
           ["calendar", "Calendar"],
           ["heatmaps", "Heatmaps"],
+          ["accounts", "Accounts"],
           ["log", "Trade Log"],
         ].map(([key, label]) => (
           <button key={key} className={`fj-tab ${view === key ? "active" : ""}`} onClick={() => setView(key)}>
@@ -593,9 +623,12 @@ export default function TradingJournal() {
       {(view === "portfolio" || view === "log" || view === "heatmaps") && (
         <FilterBar
           strategies={strategies}
+          accounts={accounts}
           filterMarkets={filterMarkets}
           filterStrategies={filterStrategies}
+          filterAccounts={filterAccounts}
           toggleStrategyFilter={toggleStrategyFilter}
+          toggleAccountFilter={toggleAccountFilter}
           dateFrom={dateFrom} dateTo={dateTo}
           setDateFrom={setDateFrom} setDateTo={setDateTo}
           onReset={resetFilters}
@@ -618,6 +651,9 @@ export default function TradingJournal() {
       {view === "heatmaps" && (
         <HeatmapsView trades={filteredTrades} settings={settings} />
       )}
+      {view === "accounts" && (
+        <AccountsView accounts={accounts} setAccounts={setAccounts} trades={trades} />
+      )}
       {view === "log" && (
         <TradeLog trades={filteredTrades} onEdit={startEdit} onDelete={handleDelete} />
       )}
@@ -626,6 +662,7 @@ export default function TradingJournal() {
         <TradeForm
           initial={editingTrade}
           strategies={strategies}
+          accounts={accounts}
           settings={settings}
           onCancel={() => { setShowForm(false); setEditingId(null); }}
           onSave={handleSave}
@@ -811,7 +848,7 @@ function TickerStrip({ byMarket, activeMarkets, onToggle }) {
 
 // ---------- filter bar ----------
 
-function FilterBar({ strategies, filterStrategies, toggleStrategyFilter, dateFrom, dateTo, setDateFrom, setDateTo, onReset }) {
+function FilterBar({ strategies, accounts, filterStrategies, filterAccounts, toggleStrategyFilter, toggleAccountFilter, dateFrom, dateTo, setDateFrom, setDateTo, onReset }) {
   return (
     <div className="fj-filterbar">
       <span className="fj-sub" style={{ marginRight: 2 }}>Strategy:</span>
@@ -821,6 +858,16 @@ function FilterBar({ strategies, filterStrategies, toggleStrategyFilter, dateFro
           {s}
         </span>
       ))}
+      {accounts.length > 0 && (
+        <>
+          <span className="fj-sub" style={{ marginLeft: 10 }}>Account:</span>
+          {accounts.map((a) => (
+            <span key={a.id} className={`fj-chip ${filterAccounts.includes(a.name) ? "active" : ""}`} onClick={() => toggleAccountFilter(a.name)}>
+              {a.name}
+            </span>
+          ))}
+        </>
+      )}
       <span className="fj-sub" style={{ marginLeft: 10 }}>From</span>
       <input type="date" className="fj-date-input" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
       <span className="fj-sub">To</span>
@@ -1052,6 +1099,210 @@ function GroupCards({ groups, emptyLabel }) {
   );
 }
 
+// ---------- accounts ----------
+
+function AccountsView({ accounts, setAccounts, trades }) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newStarting, setNewStarting] = useState("");
+  const [newMinimum, setNewMinimum] = useState("");
+  const [newStatus, setNewStatus] = useState("Evaluation");
+  const [newIsCash, setNewIsCash] = useState(false);
+  const [error, setError] = useState("");
+
+  const addAccount = (e) => {
+    e.preventDefault();
+    const name = newName.trim();
+    if (!name) { setError("Give the account a name."); return; }
+    if (accounts.some((a) => a.name === name)) { setError("An account with that name already exists."); return; }
+    const account = {
+      id: uid(),
+      name,
+      isCash: newIsCash,
+      startingBalance: Number(newStarting) || 0,
+      minimum: Number(newMinimum) || 0,
+      status: newIsCash ? "" : newStatus,
+      payouts: [],
+    };
+    setAccounts((prev) => [...prev, account]);
+    setNewName(""); setNewStarting(""); setNewMinimum(""); setNewStatus("Evaluation"); setNewIsCash(false); setError(""); setShowAdd(false);
+  };
+
+  const removeAccount = (id) => setAccounts((prev) => prev.filter((a) => a.id !== id));
+
+  const updateAccount = (id, patch) => {
+    setAccounts((prev) => prev.map((a) => a.id === id ? { ...a, ...patch } : a));
+  };
+
+  const addPayout = (id, date, amount) => {
+    setAccounts((prev) => prev.map((a) => {
+      if (a.id !== id) return a;
+      const payouts = [...(a.payouts || []), { id: uid(), date, amount }].sort((x, y) => x.date.localeCompare(y.date));
+      return { ...a, payouts };
+    }));
+  };
+
+  const removePayout = (accountId, entryId) => {
+    setAccounts((prev) => prev.map((a) => a.id === accountId ? { ...a, payouts: (a.payouts || []).filter((p) => p.id !== entryId) } : a));
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
+        <button className="fj-btn primary" onClick={() => setShowAdd((s) => !s)}>
+          <Plus size={14} /> Add account
+        </button>
+      </div>
+
+      {showAdd && (
+        <form onSubmit={addAccount} className="fj-panel">
+          <div className="fj-form-row" style={{ gridTemplateColumns: "1.4fr 1fr 1fr 1fr" }}>
+            <div className="fj-form-field">
+              <label>Account name</label>
+              <input className="fj-input" style={{ fontFamily: "Inter, sans-serif" }} placeholder="Apex 50k #1" value={newName} onChange={(e) => setNewName(e.target.value)} />
+            </div>
+            <div className="fj-form-field">
+              <label>Starting balance ($)</label>
+              <input type="number" step="0.01" className="fj-input" placeholder="50000" value={newStarting} onChange={(e) => setNewStarting(e.target.value)} />
+            </div>
+            <div className="fj-form-field">
+              <label>Minimum balance ($, optional)</label>
+              <input type="number" step="0.01" className="fj-input" placeholder="47500" value={newMinimum} onChange={(e) => setNewMinimum(e.target.value)} />
+            </div>
+            {!newIsCash && (
+              <div className="fj-form-field">
+                <label>Status</label>
+                <select className="fj-select" value={newStatus} onChange={(e) => setNewStatus(e.target.value)}>
+                  <option value="Evaluation">Evaluation</option>
+                  <option value="Passed">Passed / Funded</option>
+                  <option value="Failed">Failed</option>
+                </select>
+              </div>
+            )}
+          </div>
+          <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "var(--text-dim)", marginBottom: 12, cursor: "pointer" }}>
+            <input type="checkbox" checked={newIsCash} onChange={(e) => setNewIsCash(e.target.checked)} />
+            This is a cash account (no evaluation/funded status)
+          </label>
+          {error && <div className="fj-loss" style={{ fontSize: 12, marginBottom: 8 }}>{error}</div>}
+          <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+            <button type="button" className="fj-btn" onClick={() => setShowAdd(false)}>Cancel</button>
+            <button type="submit" className="fj-btn primary">Add account</button>
+          </div>
+        </form>
+      )}
+
+      {accounts.length === 0 ? (
+        <div className="fj-empty">No accounts added yet — click "Add account" to start tracking balances.</div>
+      ) : (
+        <div className="fj-acct-grid">
+          {accounts.map((a) => (
+            <AccountCard
+              key={a.id}
+              account={a}
+              trades={trades}
+              onRemove={() => removeAccount(a.id)}
+              onUpdate={(patch) => updateAccount(a.id, patch)}
+              onAddPayout={(date, amount) => addPayout(a.id, date, amount)}
+              onRemovePayout={(entryId) => removePayout(a.id, entryId)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AccountCard({ account, trades, onRemove, onUpdate, onAddPayout, onRemovePayout }) {
+  const [payoutDate, setPayoutDate] = useState(new Date().toISOString().slice(0, 10));
+  const [payoutAmount, setPayoutAmount] = useState("");
+
+  const taggedTrades = trades.filter((t) => (t.accounts || []).includes(account.name));
+  const tradingPnl = taggedTrades.reduce((s, t) => s + t.pnl, 0);
+  const payouts = account.payouts || [];
+  const totalPaidOut = payouts.reduce((s, p) => s + p.amount, 0);
+  const currentBalance = account.startingBalance + tradingPnl - totalPaidOut;
+  const distanceToMin = currentBalance - (account.minimum || 0);
+
+  const sortedTradeDates = Array.from(new Set(taggedTrades.map((t) => t.date))).sort();
+  const lastDay = sortedTradeDates[sortedTradeDates.length - 1];
+  const lastDayPnl = lastDay ? taggedTrades.filter((t) => t.date === lastDay).reduce((s, t) => s + t.pnl, 0) : null;
+
+  const submitPayout = (e) => {
+    e.preventDefault();
+    if (payoutAmount === "" || isNaN(Number(payoutAmount))) return;
+    onAddPayout(payoutDate, Number(payoutAmount));
+    setPayoutAmount("");
+  };
+
+  const badgeClass = account.isCash ? "cash" : account.status === "Passed" ? "passed" : account.status === "Failed" ? "failed" : "eval";
+  const badgeLabel = account.isCash ? "Cash Account" : account.status === "Passed" ? "Passed / Funded" : account.status;
+
+  return (
+    <div className="fj-acct-card">
+      <div className="fj-acct-head">
+        <div>
+          <div className="fj-acct-name">{account.name}</div>
+          <span className={`fj-badge ${badgeClass}`}>{badgeLabel}</span>
+        </div>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          {!account.isCash && (
+            <select
+              className="fj-select" style={{ fontSize: 11, padding: "4px 6px" }}
+              value={account.status} onChange={(e) => onUpdate({ status: e.target.value })}
+            >
+              <option value="Evaluation">Evaluation</option>
+              <option value="Passed">Passed / Funded</option>
+              <option value="Failed">Failed</option>
+            </select>
+          )}
+          <button className="fj-iconbtn" onClick={onRemove} title="Remove account"><Trash2 size={14} /></button>
+        </div>
+      </div>
+
+      <div className="fj-acct-row"><span>Current balance</span><b>{money(currentBalance)}</b></div>
+      <div className="fj-acct-row"><span>Starting balance</span><b>{money(account.startingBalance)}</b></div>
+      {account.minimum > 0 && (
+        <div className="fj-acct-row"><span>Minimum balance</span><b>{money(account.minimum)}</b></div>
+      )}
+      <div className="fj-acct-row"><span>Trading P&amp;L (tagged trades)</span><b className={tradingPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(tradingPnl)}</b></div>
+      <div className="fj-acct-row"><span>Total paid out</span><b>{money(totalPaidOut)}</b></div>
+      <div className="fj-acct-row"><span>Last trading day P&amp;L</span><b className={lastDayPnl === null ? "fj-neutral" : lastDayPnl >= 0 ? "fj-profit" : "fj-loss"}>{lastDayPnl === null ? "—" : money(lastDayPnl)}</b></div>
+      {account.minimum > 0 && (
+        <div className="fj-acct-row">
+          <span>Distance to minimum</span>
+          <b className={distanceToMin >= 0 ? "fj-profit" : "fj-loss"}>{money(distanceToMin)}</b>
+        </div>
+      )}
+      <div className="fj-acct-row"><span>Trades tagged here</span><b>{taggedTrades.length}</b></div>
+
+      <form onSubmit={submitPayout} className="fj-acct-updateform">
+        <div className="fj-form-field" style={{ flex: 1 }}>
+          <label>Payout date</label>
+          <input type="date" className="fj-input" value={payoutDate} onChange={(e) => setPayoutDate(e.target.value)} />
+        </div>
+        <div className="fj-form-field" style={{ flex: 1 }}>
+          <label>Amount paid out ($)</label>
+          <input type="number" step="0.01" className="fj-input" placeholder="1000" value={payoutAmount} onChange={(e) => setPayoutAmount(e.target.value)} />
+        </div>
+        <button type="submit" className="fj-btn primary" style={{ height: 37 }}>Log payout</button>
+      </form>
+
+      {(account.payouts || []).length > 0 && (
+        <div className="fj-acct-history">
+          {[...account.payouts].sort((a, b) => b.date.localeCompare(a.date)).map((p) => (
+            <div key={p.id} className="fj-acct-history-row">
+              <span>{p.date}</span>
+              <b>{money(p.amount)}</b>
+              <button className="fj-iconbtn" style={{ padding: 2 }} onClick={() => onRemovePayout(p.id)}><X size={12} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------- trade log ----------
 
 function TradeLog({ trades, onEdit, onDelete }) {
@@ -1062,7 +1313,7 @@ function TradeLog({ trades, onEdit, onDelete }) {
       <table className="fj-table">
         <thead>
           <tr>
-            <th>Date</th><th>Time</th><th>Market</th><th>Strategy</th><th>Dir</th><th>Qty</th>
+            <th>Date</th><th>Time</th><th>Market</th><th>Strategy</th><th>Accounts</th><th>Dir</th><th>Qty</th>
             <th>Entry</th><th>Exit</th><th>P&amp;L</th><th style={{ fontFamily: "Inter" }}>Notes</th><th></th>
           </tr>
         </thead>
@@ -1073,6 +1324,7 @@ function TradeLog({ trades, onEdit, onDelete }) {
               <td>{t.time || "—"}</td>
               <td>{t.market}</td>
               <td style={{ fontFamily: "Inter, sans-serif" }}>{t.strategy || "—"}</td>
+              <td style={{ fontFamily: "Inter, sans-serif", color: "#8B929E" }}>{(t.accounts && t.accounts.length) ? t.accounts.join(", ") : "—"}</td>
               <td className={t.direction === "Short" ? "fj-loss" : "fj-profit"}>{t.direction}</td>
               <td>{t.contracts}</td>
               <td>{t.entry || "—"}</td>
@@ -1467,7 +1719,7 @@ function CalendarHeatmap({ trades }) {
 
 // ---------- trade form ----------
 
-function TradeForm({ initial, strategies, settings, onCancel, onSave }) {
+function TradeForm({ initial, strategies, accounts, settings, onCancel, onSave }) {
   const [date, setDate] = useState(initial?.date || new Date().toISOString().slice(0, 10));
   const [time, setTime] = useState(initial?.time || "");
   const [market, setMarket] = useState(initial?.market || "MES");
@@ -1479,6 +1731,11 @@ function TradeForm({ initial, strategies, settings, onCancel, onSave }) {
   const [fees, setFees] = useState(initial?.fees ?? 0);
   const [pnl, setPnl] = useState(initial?.pnl ?? "");
   const [notes, setNotes] = useState(initial?.notes || "");
+  const [tradeAccounts, setTradeAccounts] = useState(initial?.accounts || []);
+
+  const toggleTradeAccount = (name) => {
+    setTradeAccounts((prev) => prev.includes(name) ? prev.filter((x) => x !== name) : [...prev, name]);
+  };
 
   const calcFromPrices = () => {
     const mult = Number(settings[market]?.multiplier) || 1;
@@ -1500,6 +1757,7 @@ function TradeForm({ initial, strategies, settings, onCancel, onSave }) {
       fees: Number(fees) || 0,
       pnl: Number(pnl),
       notes: notes.trim(),
+      accounts: tradeAccounts,
     });
   };
 
@@ -1547,6 +1805,29 @@ function TradeForm({ initial, strategies, settings, onCancel, onSave }) {
               <div className={`fj-toggle ${direction === "Long" ? "active-long" : ""}`} onClick={() => setDirection("Long")}>Long</div>
               <div className={`fj-toggle ${direction === "Short" ? "active-short" : ""}`} onClick={() => setDirection("Short")}>Short</div>
             </div>
+          </div>
+
+          <div className="fj-form-field" style={{ marginBottom: 10 }}>
+            <label>Accounts (optional — tag every account this trade applies to)</label>
+            {accounts.length === 0 ? (
+              <div className="fj-sub">No accounts added yet — add one under the Accounts tab.</div>
+            ) : (
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                {accounts.map((a) => {
+                  const active = tradeAccounts.includes(a.name);
+                  return (
+                    <span
+                      key={a.id}
+                      className="fj-chip"
+                      style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "#14161B", fontWeight: 600 } : undefined}
+                      onClick={() => toggleTradeAccount(a.name)}
+                    >
+                      {a.name}
+                    </span>
+                  );
+                })}
+              </div>
+            )}
           </div>
 
           <div className="fj-form-row">
