@@ -174,7 +174,75 @@ function buildMultiEquityCurve(trades, strategyList) {
   return rows;
 }
 
+// ---------- account drawdown engine ----------
+//
+// Common prop-firm accounts don't use a flat minimum balance — the floor
+// moves. Two mechanics matter:
+//  - EOD (end-of-day): the floor only recalculates once, at session close,
+//    based on the highest EOD balance ever reached.
+//  - Intraday: the floor recalculates continuously off the peak balance
+//    (we approximate this with realized trade P&L since we don't have
+//    tick-level unrealized equity — noted in the UI).
+//  - Static: the floor never moves from starting balance - drawdown amount.
+// Most trailing accounts also "lock" once the floor reaches a certain
+// level (commonly the profit target, or the original starting balance) —
+// after that point they behave like a static floor.
+
+function buildAccountBalanceTimeline(account, trades) {
+  const taggedTrades = trades.filter((t) => (t.accounts || []).includes(account.name));
+  const byDate = {};
+  taggedTrades.forEach((t) => { byDate[t.date] = (byDate[t.date] || 0) + t.pnl; });
+
+  const dates = Object.keys(byDate).sort();
+  let running = account.startingBalance;
+  const timeline = [];
+  dates.forEach((date) => {
+    running += byDate[date];
+    timeline.push({ date, balance: Number(running.toFixed(2)) });
+  });
+
+  const currentBalance = timeline.length ? timeline[timeline.length - 1].balance : account.startingBalance;
+  const priorDayBalance = timeline.length >= 2 ? timeline[timeline.length - 2].balance : account.startingBalance;
+  const peakBalance = Math.max(account.startingBalance, ...timeline.map((t) => t.balance));
+  const totalPaidOut = (account.payouts || []).reduce((s, p) => s + p.amount, 0);
+
+  return {
+    timeline, currentBalance, priorDayBalance, peakBalance, totalPaidOut,
+    tradingPnl: taggedTrades.reduce((s, t) => s + t.pnl, 0),
+  };
+}
+
+function computeAccountFloor(account, timelineData) {
+  const { peakBalance, totalPaidOut } = timelineData;
+  const drawdownAmount = Number(account.drawdownAmount) || 0;
+  const profitTarget = Number(account.profitTarget) || 0;
+  const base = account.startingBalance - drawdownAmount;
+
+  // Backward compatibility: accounts created before this feature only have
+  // a flat `minimum`. If no drawdown amount is set, fall back to that.
+  if (!drawdownAmount) {
+    return { floor: (account.minimum || 0) - totalPaidOut, locked: true, mode: "static" };
+  }
+
+  if (account.drawdownType === "static") {
+    return { floor: base - totalPaidOut, locked: true, mode: "static" };
+  }
+
+  const lockLevel =
+    account.trailingLock === "starting" ? account.startingBalance
+    : account.trailingLock === "none" ? Infinity
+    : account.startingBalance + profitTarget; // default: lock at profit target
+
+  const cappedPeak = Math.min(peakBalance, lockLevel);
+  const dynamicFloor = cappedPeak - drawdownAmount;
+  const floor = Math.max(base, dynamicFloor) - totalPaidOut;
+  const locked = lockLevel !== Infinity && cappedPeak >= lockLevel;
+
+  return { floor: Number(floor.toFixed(2)), locked, mode: account.drawdownType === "intraday" ? "intraday" : "eod" };
+}
+
 // ---------- storage ----------
+
 
 async function loadJSON(key, fallback) {
   try {
@@ -735,6 +803,25 @@ function ImportPreviewModal({ preview, existingCount, onAppend, onReplace, onCan
 
 const ACCENT_PALETTE = ["#6C93AD", "#9385C9", "#D9A441", "#C7B15A", "#7FAE8E", "#B87F9E", "#8AA3C2", "#C0895F"];
 
+// Commonly published prop-firm evaluation rules as of mid-2026. These firms
+// change pricing and rules often (Apex overhauled its entire structure in
+// March 2026) — treat these as a fast starting point, not gospel. Every
+// field is editable after picking a preset.
+const PROP_PRESETS = [
+  {
+    key: "apex-50k-eod",
+    label: "Apex Trader Funding — $50K (EOD)",
+    startingBalance: 50000, drawdownAmount: 2000, profitTarget: 3000,
+    drawdownType: "eod", trailingLock: "target",
+  },
+  {
+    key: "topstep-50k",
+    label: "Topstep — $50K Trading Combine",
+    startingBalance: 50000, drawdownAmount: 2000, profitTarget: 3000,
+    drawdownType: "eod", trailingLock: "starting",
+  },
+];
+
 function SettingsPanel({ settings, setSettings, onClose }) {
   const [newSymbol, setNewSymbol] = useState("");
   const [newLabel, setNewLabel] = useState("");
@@ -1103,12 +1190,30 @@ function GroupCards({ groups, emptyLabel }) {
 
 function AccountsView({ accounts, setAccounts, trades }) {
   const [showAdd, setShowAdd] = useState(false);
+  const [preset, setPreset] = useState("custom");
   const [newName, setNewName] = useState("");
   const [newStarting, setNewStarting] = useState("");
   const [newMinimum, setNewMinimum] = useState("");
+  const [newDrawdownType, setNewDrawdownType] = useState("eod");
+  const [newDrawdownAmount, setNewDrawdownAmount] = useState("");
+  const [newProfitTarget, setNewProfitTarget] = useState("");
+  const [newTrailingLock, setNewTrailingLock] = useState("target");
   const [newStatus, setNewStatus] = useState("Evaluation");
   const [newIsCash, setNewIsCash] = useState(false);
   const [error, setError] = useState("");
+
+  const applyPreset = (key) => {
+    setPreset(key);
+    const p = PROP_PRESETS.find((x) => x.key === key);
+    if (!p) return;
+    setNewStarting(p.startingBalance);
+    setNewDrawdownAmount(p.drawdownAmount);
+    setNewProfitTarget(p.profitTarget);
+    setNewDrawdownType(p.drawdownType);
+    setNewTrailingLock(p.trailingLock);
+    setNewIsCash(false);
+    setNewStatus("Evaluation");
+  };
 
   const addAccount = (e) => {
     e.preventDefault();
@@ -1121,11 +1226,17 @@ function AccountsView({ accounts, setAccounts, trades }) {
       isCash: newIsCash,
       startingBalance: Number(newStarting) || 0,
       minimum: Number(newMinimum) || 0,
+      drawdownType: newIsCash ? "static" : newDrawdownType,
+      drawdownAmount: newIsCash ? 0 : Number(newDrawdownAmount) || 0,
+      profitTarget: newIsCash ? 0 : Number(newProfitTarget) || 0,
+      trailingLock: newTrailingLock,
       status: newIsCash ? "" : newStatus,
       payouts: [],
     };
     setAccounts((prev) => [...prev, account]);
-    setNewName(""); setNewStarting(""); setNewMinimum(""); setNewStatus("Evaluation"); setNewIsCash(false); setError(""); setShowAdd(false);
+    setNewName(""); setNewStarting(""); setNewMinimum(""); setNewDrawdownAmount(""); setNewProfitTarget("");
+    setNewDrawdownType("eod"); setNewTrailingLock("target"); setNewStatus("Evaluation"); setNewIsCash(false);
+    setPreset("custom"); setError(""); setShowAdd(false);
   };
 
   const removeAccount = (id) => setAccounts((prev) => prev.filter((a) => a.id !== id));
@@ -1156,7 +1267,20 @@ function AccountsView({ accounts, setAccounts, trades }) {
 
       {showAdd && (
         <form onSubmit={addAccount} className="fj-panel">
-          <div className="fj-form-row" style={{ gridTemplateColumns: "1.4fr 1fr 1fr 1fr" }}>
+          <div className="fj-form-field" style={{ marginBottom: 12 }}>
+            <label>Start from a common prop firm preset (optional)</label>
+            <select className="fj-select" value={preset} onChange={(e) => applyPreset(e.target.value)}>
+              <option value="custom">Custom — I'll fill in the numbers</option>
+              {PROP_PRESETS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+            </select>
+          </div>
+          {preset !== "custom" && (
+            <div className="fj-sub" style={{ marginBottom: 12 }}>
+              Prefilled from commonly published rules as of mid-2026 — firms change pricing and rules often, so double-check against the firm's current terms before relying on this. Every field below is still editable.
+            </div>
+          )}
+
+          <div className="fj-form-row" style={{ gridTemplateColumns: "1.4fr 1fr 1fr" }}>
             <div className="fj-form-field">
               <label>Account name</label>
               <input className="fj-input" style={{ fontFamily: "Inter, sans-serif" }} placeholder="Apex 50k #1" value={newName} onChange={(e) => setNewName(e.target.value)} />
@@ -1164,10 +1288,6 @@ function AccountsView({ accounts, setAccounts, trades }) {
             <div className="fj-form-field">
               <label>Starting balance ($)</label>
               <input type="number" step="0.01" className="fj-input" placeholder="50000" value={newStarting} onChange={(e) => setNewStarting(e.target.value)} />
-            </div>
-            <div className="fj-form-field">
-              <label>Minimum balance ($, optional)</label>
-              <input type="number" step="0.01" className="fj-input" placeholder="47500" value={newMinimum} onChange={(e) => setNewMinimum(e.target.value)} />
             </div>
             {!newIsCash && (
               <div className="fj-form-field">
@@ -1180,10 +1300,50 @@ function AccountsView({ accounts, setAccounts, trades }) {
               </div>
             )}
           </div>
-          <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "var(--text-dim)", marginBottom: 12, cursor: "pointer" }}>
+
+          <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "var(--text-dim)", margin: "2px 0 12px", cursor: "pointer" }}>
             <input type="checkbox" checked={newIsCash} onChange={(e) => setNewIsCash(e.target.checked)} />
-            This is a cash account (no evaluation/funded status)
+            This is a cash account (no evaluation/funded status, no drawdown tracking)
           </label>
+
+          {!newIsCash && (
+            <>
+              <div className="fj-form-row" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
+                <div className="fj-form-field">
+                  <label>Drawdown type</label>
+                  <select className="fj-select" value={newDrawdownType} onChange={(e) => setNewDrawdownType(e.target.value)}>
+                    <option value="eod">EOD (recalculates at close)</option>
+                    <option value="intraday">Intraday (trails in real time)</option>
+                    <option value="static">Static (fixed floor)</option>
+                  </select>
+                </div>
+                <div className="fj-form-field">
+                  <label>Max drawdown ($)</label>
+                  <input type="number" step="0.01" className="fj-input" placeholder="2000" value={newDrawdownAmount} onChange={(e) => setNewDrawdownAmount(e.target.value)} />
+                </div>
+                <div className="fj-form-field">
+                  <label>Profit target to pass ($)</label>
+                  <input type="number" step="0.01" className="fj-input" placeholder="3000" value={newProfitTarget} onChange={(e) => setNewProfitTarget(e.target.value)} />
+                </div>
+              </div>
+              {newDrawdownType !== "static" && (
+                <div className="fj-form-field" style={{ marginBottom: 12 }}>
+                  <label>Trailing locks at</label>
+                  <select className="fj-select" value={newTrailingLock} onChange={(e) => setNewTrailingLock(e.target.value)}>
+                    <option value="target">Profit target reached (e.g. Apex)</option>
+                    <option value="starting">Starting balance reached (e.g. Topstep)</option>
+                    <option value="none">Never — always trails</option>
+                  </select>
+                </div>
+              )}
+            </>
+          )}
+
+          <div className="fj-form-field" style={{ marginBottom: 12 }}>
+            <label>Flat minimum balance ($, optional — only if this isn't a trailing/EOD account)</label>
+            <input type="number" step="0.01" className="fj-input" placeholder="e.g. a personal risk floor for a cash account" value={newMinimum} onChange={(e) => setNewMinimum(e.target.value)} />
+          </div>
+
           {error && <div className="fj-loss" style={{ fontSize: 12, marginBottom: 8 }}>{error}</div>}
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
             <button type="button" className="fj-btn" onClick={() => setShowAdd(false)}>Cancel</button>
@@ -1213,17 +1373,39 @@ function AccountsView({ accounts, setAccounts, trades }) {
   );
 }
 
+function AccountBar({ min, current, max, currentLabel, minLabel, maxLabel }) {
+  const span = Math.max(max - min, 1);
+  const pct = Math.max(0, Math.min(100, ((current - min) / span) * 100));
+  const zoneColor = pct < 25 ? "var(--loss)" : pct < 75 ? "var(--amber)" : "var(--profit)";
+  return (
+    <div style={{ margin: "10px 0 4px" }}>
+      <div style={{ position: "relative", height: 10, borderRadius: 6, background: "var(--panel-alt)", border: "1px solid var(--border)" }}>
+        <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${pct}%`, borderRadius: 6, background: zoneColor, transition: "width .2s" }} />
+        <div style={{ position: "absolute", left: `${pct}%`, top: -4, transform: "translateX(-50%)", width: 2, height: 18, background: "#E7E5E0" }} />
+      </div>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5, fontSize: 10.5, fontFamily: "JetBrains Mono, monospace" }}>
+        <span style={{ color: "var(--text-dim)" }}>{minLabel}<br /><b style={{ color: "var(--text)" }}>{money(min)}</b></span>
+        <span style={{ color: "var(--text-dim)", textAlign: "center" }}>{currentLabel}<br /><b style={{ color: zoneColor }}>{money(current)}</b></span>
+        <span style={{ color: "var(--text-dim)", textAlign: "right" }}>{maxLabel}<br /><b style={{ color: "var(--text)" }}>{money(max)}</b></span>
+      </div>
+    </div>
+  );
+}
+
 function AccountCard({ account, trades, onRemove, onUpdate, onAddPayout, onRemovePayout }) {
   const [payoutDate, setPayoutDate] = useState(new Date().toISOString().slice(0, 10));
   const [payoutAmount, setPayoutAmount] = useState("");
 
-  const taggedTrades = trades.filter((t) => (t.accounts || []).includes(account.name));
-  const tradingPnl = taggedTrades.reduce((s, t) => s + t.pnl, 0);
+  const timelineData = buildAccountBalanceTimeline(account, trades);
+  const { currentBalance, peakBalance, tradingPnl } = timelineData;
+  const { floor, locked, mode } = computeAccountFloor(account, timelineData);
   const payouts = account.payouts || [];
   const totalPaidOut = payouts.reduce((s, p) => s + p.amount, 0);
-  const currentBalance = account.startingBalance + tradingPnl - totalPaidOut;
-  const distanceToMin = currentBalance - (account.minimum || 0);
+  const distanceToFloor = currentBalance - floor;
+  const profitTarget = Number(account.profitTarget) || 0;
+  const isEvalWithTarget = account.status === "Evaluation" && profitTarget > 0;
 
+  const taggedTrades = trades.filter((t) => (t.accounts || []).includes(account.name));
   const sortedTradeDates = Array.from(new Set(taggedTrades.map((t) => t.date))).sort();
   const lastDay = sortedTradeDates[sortedTradeDates.length - 1];
   const lastDayPnl = lastDay ? taggedTrades.filter((t) => t.date === lastDay).reduce((s, t) => s + t.pnl, 0) : null;
@@ -1237,6 +1419,7 @@ function AccountCard({ account, trades, onRemove, onUpdate, onAddPayout, onRemov
 
   const badgeClass = account.isCash ? "cash" : account.status === "Passed" ? "passed" : account.status === "Failed" ? "failed" : "eval";
   const badgeLabel = account.isCash ? "Cash Account" : account.status === "Passed" ? "Passed / Funded" : account.status;
+  const hasFloor = (Number(account.drawdownAmount) || 0) > 0 || (account.minimum || 0) > 0;
 
   return (
     <div className="fj-acct-card">
@@ -1260,18 +1443,37 @@ function AccountCard({ account, trades, onRemove, onUpdate, onAddPayout, onRemov
         </div>
       </div>
 
-      <div className="fj-acct-row"><span>Current balance</span><b>{money(currentBalance)}</b></div>
+      {hasFloor && isEvalWithTarget && (
+        <AccountBar
+          min={floor} current={currentBalance} max={account.startingBalance + profitTarget}
+          minLabel="Floor" currentLabel="Current" maxLabel="Target to pass"
+        />
+      )}
+      {hasFloor && !isEvalWithTarget && (
+        <AccountBar
+          min={floor} current={currentBalance} max={Math.max(peakBalance, currentBalance, floor + (Number(account.drawdownAmount) || 1000))}
+          minLabel="Floor" currentLabel="Current" maxLabel="Peak"
+        />
+      )}
+
+      <div className="fj-acct-row" style={{ marginTop: hasFloor ? 12 : 0 }}><span>Current balance</span><b>{money(currentBalance)}</b></div>
       <div className="fj-acct-row"><span>Starting balance</span><b>{money(account.startingBalance)}</b></div>
-      {account.minimum > 0 && (
-        <div className="fj-acct-row"><span>Minimum balance</span><b>{money(account.minimum)}</b></div>
+      {hasFloor && (
+        <div className="fj-acct-row">
+          <span>Drawdown floor {mode !== "static" && !locked ? "(trailing)" : mode !== "static" && locked ? "(locked)" : ""}</span>
+          <b>{money(floor)}</b>
+        </div>
+      )}
+      {isEvalWithTarget && (
+        <div className="fj-acct-row"><span>Profit target</span><b>{money(account.startingBalance + profitTarget)}</b></div>
       )}
       <div className="fj-acct-row"><span>Trading P&amp;L (tagged trades)</span><b className={tradingPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(tradingPnl)}</b></div>
       <div className="fj-acct-row"><span>Total paid out</span><b>{money(totalPaidOut)}</b></div>
       <div className="fj-acct-row"><span>Last trading day P&amp;L</span><b className={lastDayPnl === null ? "fj-neutral" : lastDayPnl >= 0 ? "fj-profit" : "fj-loss"}>{lastDayPnl === null ? "—" : money(lastDayPnl)}</b></div>
-      {account.minimum > 0 && (
+      {hasFloor && (
         <div className="fj-acct-row">
-          <span>Distance to minimum</span>
-          <b className={distanceToMin >= 0 ? "fj-profit" : "fj-loss"}>{money(distanceToMin)}</b>
+          <span>Distance to floor</span>
+          <b className={distanceToFloor >= 0 ? "fj-profit" : "fj-loss"}>{money(distanceToFloor)}</b>
         </div>
       )}
       <div className="fj-acct-row"><span>Trades tagged here</span><b>{taggedTrades.length}</b></div>
