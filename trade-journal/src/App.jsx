@@ -92,6 +92,7 @@ function calcStats(trades) {
     n, totalPnl: 0, winRate: 0, avgWin: 0, avgLoss: 0,
     profitFactor: null, expectancy: 0, maxDD: 0,
     largestWin: 0, largestLoss: 0, wins: 0, losses: 0, scratches: 0,
+    maxWinStreak: 0, maxLossStreak: 0,
   };
   if (n === 0) return base;
 
@@ -106,11 +107,18 @@ function calcStats(trades) {
     (a, b) => new Date(`${a.date}T${a.time || "00:00"}`) - new Date(`${b.date}T${b.time || "00:00"}`)
   );
   let equity = 0, peak = 0, maxDD = 0;
+  let curWinStreak = 0, maxWinStreak = 0, curLossStreak = 0, maxLossStreak = 0;
   sorted.forEach((t) => {
     equity += t.pnl;
     if (equity > peak) peak = equity;
     const dd = peak - equity;
     if (dd > maxDD) maxDD = dd;
+
+    if (t.pnl > 0) { curWinStreak += 1; curLossStreak = 0; }
+    else if (t.pnl < 0) { curLossStreak += 1; curWinStreak = 0; }
+    else { curWinStreak = 0; curLossStreak = 0; }
+    if (curWinStreak > maxWinStreak) maxWinStreak = curWinStreak;
+    if (curLossStreak > maxLossStreak) maxLossStreak = curLossStreak;
   });
 
   return {
@@ -127,6 +135,8 @@ function calcStats(trades) {
     wins: wins.length,
     losses: losses.length,
     scratches: scratches.length,
+    maxWinStreak,
+    maxLossStreak,
   };
 }
 
@@ -201,10 +211,11 @@ function buildAccountBalanceTimeline(account, trades) {
     timeline.push({ date, balance: Number(running.toFixed(2)) });
   });
 
-  const currentBalance = timeline.length ? timeline[timeline.length - 1].balance : account.startingBalance;
+  const rawCurrentBalance = timeline.length ? timeline[timeline.length - 1].balance : account.startingBalance;
   const priorDayBalance = timeline.length >= 2 ? timeline[timeline.length - 2].balance : account.startingBalance;
   const peakBalance = Math.max(account.startingBalance, ...timeline.map((t) => t.balance));
   const totalPaidOut = (account.payouts || []).reduce((s, p) => s + p.amount, 0);
+  const currentBalance = Number((rawCurrentBalance - totalPaidOut).toFixed(2));
 
   return {
     timeline, currentBalance, priorDayBalance, peakBalance, totalPaidOut,
@@ -281,6 +292,8 @@ export default function TradingJournal() {
   const [dateTo, setDateTo] = useState("");
   const [importPreview, setImportPreview] = useState(null); // { parsed, errorCount, total }
   const fileInputRef = useRef(null);
+  const [restorePreview, setRestorePreview] = useState(null); // { data, tradeCount, accountCount } | { error }
+  const backupFileInputRef = useRef(null);
 
   useEffect(() => {
     (async () => {
@@ -457,6 +470,61 @@ export default function TradingJournal() {
     if (mode === "append") setTrades((prev) => [...prev, ...importPreview.parsed]);
     if (mode === "replace") setTrades(importPreview.parsed);
     setImportPreview(null);
+  };
+
+  const handleBackup = () => {
+    const payload = {
+      kind: "position-ledger-backup",
+      version: 1,
+      exportedAt: new Date().toISOString(),
+      trades,
+      accounts,
+      settings,
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `trade-journal-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const triggerRestore = () => backupFileInputRef.current?.click();
+
+  const handleBackupFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const data = JSON.parse(reader.result);
+        if (!data || typeof data !== "object" || (!Array.isArray(data.trades) && !Array.isArray(data.accounts))) {
+          setRestorePreview({ error: "This doesn't look like a Position Ledger backup file." });
+          return;
+        }
+        setRestorePreview({
+          data,
+          tradeCount: Array.isArray(data.trades) ? data.trades.length : 0,
+          accountCount: Array.isArray(data.accounts) ? data.accounts.length : 0,
+        });
+      } catch {
+        setRestorePreview({ error: "Couldn't read that file — make sure it's an unmodified backup JSON file." });
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  const confirmRestore = () => {
+    if (!restorePreview || restorePreview.error) return;
+    const { data } = restorePreview;
+    setTrades(Array.isArray(data.trades) ? data.trades : []);
+    setAccounts(Array.isArray(data.accounts) ? data.accounts : []);
+    setSettings({ ...DEFAULT_SETTINGS, ...(data.settings || {}) });
+    setRestorePreview(null);
   };
 
   if (!ready) {
@@ -642,6 +710,8 @@ export default function TradingJournal() {
         onSettings={() => setShowSettings((s) => !s)}
         onExport={handleExport}
         onImportClick={triggerImport}
+        onBackup={handleBackup}
+        onRestoreClick={triggerRestore}
       />
 
       <input
@@ -652,6 +722,14 @@ export default function TradingJournal() {
         onChange={handleFileChange}
       />
 
+      <input
+        ref={backupFileInputRef}
+        type="file"
+        accept=".json,application/json"
+        style={{ display: "none" }}
+        onChange={handleBackupFileChange}
+      />
+
       {importPreview && (
         <ImportPreviewModal
           preview={importPreview}
@@ -659,6 +737,16 @@ export default function TradingJournal() {
           onAppend={() => confirmImport("append")}
           onReplace={() => confirmImport("replace")}
           onCancel={() => setImportPreview(null)}
+        />
+      )}
+
+      {restorePreview && (
+        <RestorePreviewModal
+          preview={restorePreview}
+          existingTradeCount={trades.length}
+          existingAccountCount={accounts.length}
+          onConfirm={confirmRestore}
+          onCancel={() => setRestorePreview(null)}
         />
       )}
 
@@ -742,7 +830,7 @@ export default function TradingJournal() {
 
 // ---------- header ----------
 
-function Header({ onAdd, onSettings, onExport, onImportClick }) {
+function Header({ onAdd, onSettings, onExport, onImportClick, onBackup, onRestoreClick }) {
   return (
     <div className="fj-header">
       <div>
@@ -753,6 +841,8 @@ function Header({ onAdd, onSettings, onExport, onImportClick }) {
         <button className="fj-btn" onClick={onSettings}><Settings2 size={14} /> Contract settings</button>
         <button className="fj-btn" onClick={onImportClick}><Upload size={14} /> Import CSV</button>
         <button className="fj-btn" onClick={onExport}><Download size={14} /> Export CSV</button>
+        <button className="fj-btn" onClick={onRestoreClick} title="Restore trades, accounts, and settings from a backup file"><Upload size={14} /> Restore backup</button>
+        <button className="fj-btn" onClick={onBackup} title="Download everything — trades, accounts, settings — as one file"><Download size={14} /> Backup all data</button>
         <button className="fj-btn primary" onClick={onAdd}><Plus size={15} /> Add trade</button>
       </div>
     </div>
@@ -793,6 +883,40 @@ function ImportPreviewModal({ preview, existingCount, onAppend, onReplace, onCan
               <button className="fj-btn danger" onClick={onReplace}>Replace all trades</button>
               <button className="fj-btn primary" onClick={onAppend}>Append to existing</button>
             </>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function RestorePreviewModal({ preview, existingTradeCount, existingAccountCount, onConfirm, onCancel }) {
+  return (
+    <div className="fj-modal-backdrop" onClick={onCancel}>
+      <div className="fj-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 460 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <p className="fj-panel-title" style={{ margin: 0 }}>Restore backup</p>
+          <button className="fj-iconbtn" onClick={onCancel}><X size={18} /></button>
+        </div>
+
+        {preview.error ? (
+          <div className="fj-loss" style={{ fontSize: 13, marginBottom: 16 }}>{preview.error}</div>
+        ) : (
+          <>
+            <div className="fj-sub" style={{ marginBottom: 14, lineHeight: 1.6 }}>
+              This backup contains <b style={{ color: "#E7E5E0" }}>{preview.tradeCount}</b> trade{preview.tradeCount === 1 ? "" : "s"} and <b style={{ color: "#E7E5E0" }}>{preview.accountCount}</b> account{preview.accountCount === 1 ? "" : "s"}.
+            </div>
+            <div className="fj-loss" style={{ fontSize: 12.5, marginBottom: 16, lineHeight: 1.6 }}>
+              Restoring replaces everything currently in this journal — your {existingTradeCount} current trade{existingTradeCount === 1 ? "" : "s"} and {existingAccountCount} current account{existingAccountCount === 1 ? "" : "s"} will be overwritten. This can't be undone unless you have another backup of the current data.
+            </div>
+          </>
+        )}
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button className="fj-btn" onClick={onCancel}>Cancel</button>
+          {!preview.error && (
+            <button className="fj-btn danger" onClick={onConfirm}>Replace everything</button>
           )}
         </div>
       </div>
@@ -978,6 +1102,8 @@ function StatGrid({ stats }) {
     ["Avg loss", money(-stats.avgLoss), "fj-loss"],
     ["Expectancy / trade", money(stats.expectancy), stats.expectancy >= 0 ? "fj-profit" : "fj-loss"],
     ["Max drawdown", money(-stats.maxDD), "fj-loss"],
+    ["Longest win streak", stats.n ? `${stats.maxWinStreak} trade${stats.maxWinStreak === 1 ? "" : "s"}` : "—", "fj-profit"],
+    ["Longest loss streak", stats.n ? `${stats.maxLossStreak} trade${stats.maxLossStreak === 1 ? "" : "s"}` : "—", "fj-loss"],
   ];
   return (
     <div className="fj-stat-grid">
@@ -1163,6 +1289,8 @@ function GroupCards({ groups, emptyLabel }) {
                 <div className="fj-strat-row"><span>Largest win</span><b className="fj-profit">{money(g.stats.largestWin)}</b></div>
                 <div className="fj-strat-row"><span>Largest loss</span><b className="fj-loss">{money(g.stats.largestLoss)}</b></div>
                 <div className="fj-strat-row"><span>Max drawdown</span><b className="fj-loss">{money(-g.stats.maxDD)}</b></div>
+                <div className="fj-strat-row"><span>Longest win streak</span><b className="fj-profit">{g.stats.maxWinStreak} trade{g.stats.maxWinStreak === 1 ? "" : "s"}</b></div>
+                <div className="fj-strat-row"><span>Longest loss streak</span><b className="fj-loss">{g.stats.maxLossStreak} trade{g.stats.maxLossStreak === 1 ? "" : "s"}</b></div>
               </div>
             )}
 
@@ -1257,8 +1385,60 @@ function AccountsView({ accounts, setAccounts, trades }) {
     setAccounts((prev) => prev.map((a) => a.id === accountId ? { ...a, payouts: (a.payouts || []).filter((p) => p.id !== entryId) } : a));
   };
 
+  const rollup = useMemo(() => {
+    if (accounts.length === 0) return null;
+    let currentTotal = 0, startingTotal = 0, tradingPnlTotal = 0, paidOutTotal = 0, breachedCount = 0;
+    let evalCount = 0, passedCount = 0, failedCount = 0, cashCount = 0;
+    accounts.forEach((a) => {
+      const timelineData = buildAccountBalanceTimeline(a, trades);
+      const { floor } = computeAccountFloor(a, timelineData);
+      currentTotal += timelineData.currentBalance;
+      startingTotal += a.startingBalance;
+      tradingPnlTotal += timelineData.tradingPnl;
+      paidOutTotal += timelineData.totalPaidOut;
+      const hasFloor = (Number(a.drawdownAmount) || 0) > 0 || (a.minimum || 0) > 0;
+      if (hasFloor && timelineData.currentBalance < floor) breachedCount += 1;
+      if (a.isCash) cashCount += 1;
+      else if (a.status === "Passed") passedCount += 1;
+      else if (a.status === "Failed") failedCount += 1;
+      else evalCount += 1;
+    });
+    return { currentTotal, startingTotal, tradingPnlTotal, paidOutTotal, breachedCount, evalCount, passedCount, failedCount, cashCount };
+  }, [accounts, trades]);
+
   return (
     <div>
+      {rollup && (
+        <div className="fj-panel">
+          <p className="fj-panel-title">All accounts combined</p>
+          <div className="fj-stat-grid">
+            <div className="fj-stat-card">
+              <div className="fj-stat-label">Total current balance</div>
+              <div className="fj-stat-value">{money(rollup.currentTotal)}</div>
+            </div>
+            <div className="fj-stat-card">
+              <div className="fj-stat-label">Total trading P&amp;L</div>
+              <div className={`fj-stat-value ${rollup.tradingPnlTotal >= 0 ? "fj-profit" : "fj-loss"}`}>{money(rollup.tradingPnlTotal)}</div>
+            </div>
+            <div className="fj-stat-card">
+              <div className="fj-stat-label">Total paid out</div>
+              <div className="fj-stat-value">{money(rollup.paidOutTotal)}</div>
+            </div>
+            <div className="fj-stat-card">
+              <div className="fj-stat-label">Accounts</div>
+              <div className="fj-stat-value">{accounts.length}</div>
+            </div>
+            <div className="fj-stat-card">
+              <div className="fj-stat-label">Below floor</div>
+              <div className={`fj-stat-value ${rollup.breachedCount > 0 ? "fj-loss" : "fj-profit"}`}>{rollup.breachedCount}</div>
+            </div>
+          </div>
+          <div className="fj-sub" style={{ marginTop: 4 }}>
+            {rollup.evalCount} Evaluation · {rollup.passedCount} Passed/Funded · {rollup.failedCount} Failed · {rollup.cashCount} Cash
+          </div>
+        </div>
+      )}
+
       <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 14 }}>
         <button className="fj-btn primary" onClick={() => setShowAdd((s) => !s)}>
           <Plus size={14} /> Add account
