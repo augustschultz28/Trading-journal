@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, BarChart, Bar, ReferenceLine
+  ResponsiveContainer, BarChart, Bar, ReferenceLine, ScatterChart, Scatter, Cell
 } from "recharts";
 import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, RotateCcw, Settings2, ChevronDown, ChevronUp, Upload, Download } from "lucide-react";
 import Papa from "papaparse";
@@ -468,7 +468,7 @@ export default function TradingJournal() {
   const confirmImport = (mode) => {
     if (!importPreview) return;
     if (mode === "append") setTrades((prev) => [...prev, ...importPreview.parsed]);
-    if (mode === "replace") setTrades(importPreview.parsed);
+    if (mode === "replace") { setTrades(importPreview.parsed); resetFilters(); }
     setImportPreview(null);
   };
 
@@ -524,6 +524,7 @@ export default function TradingJournal() {
     setTrades(Array.isArray(data.trades) ? data.trades : []);
     setAccounts(Array.isArray(data.accounts) ? data.accounts : []);
     setSettings({ ...DEFAULT_SETTINGS, ...(data.settings || {}) });
+    resetFilters();
     setRestorePreview(null);
   };
 
@@ -673,6 +674,13 @@ export default function TradingJournal() {
         .fj-acct-history-row { display:flex; justify-content:space-between; align-items:center; font-size:11.5px; font-family:'JetBrains Mono',monospace; padding:4px 2px; border-bottom:1px solid var(--border); color:var(--text-dim); }
         .fj-acct-history-row b { color:var(--text); font-weight:500; }
 
+        .fj-legend-row { display:flex; flex-wrap:wrap; gap:12px; margin-top:12px; }
+        .fj-legend-item { display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
+        .fj-legend-swatch { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
+
+        .fj-filter-banner { display:flex; justify-content:space-between; align-items:center; gap:10px; background:rgba(217,164,65,0.12);
+          border:1px solid rgba(217,164,65,0.4); border-radius:8px; padding:8px 12px; margin-bottom:14px; font-size:12.5px; color:var(--amber); }
+
         .fj-empty { color:var(--text-dim); font-size:13px; text-align:center; padding:30px 10px; }
 
 
@@ -760,6 +768,22 @@ export default function TradingJournal() {
         onToggle={toggleMarketFilter}
       />
 
+      {(filterMarkets.length > 0 || filterStrategies.length > 0 || filterAccounts.length > 0 || dateFrom || dateTo) && (
+        <div className="fj-filter-banner">
+          <span>
+            Filtered — {[
+              filterMarkets.length > 0 && `${filterMarkets.length} market${filterMarkets.length === 1 ? "" : "s"}`,
+              filterStrategies.length > 0 && `${filterStrategies.length} strateg${filterStrategies.length === 1 ? "y" : "ies"}`,
+              filterAccounts.length > 0 && `${filterAccounts.length} account${filterAccounts.length === 1 ? "" : "s"}`,
+              (dateFrom || dateTo) && "date range",
+            ].filter(Boolean).join(", ")} — this applies across every tab, including Calendar and Heatmaps.
+          </span>
+          <button className="fj-btn" style={{ padding: "4px 10px" }} onClick={resetFilters}>
+            <RotateCcw size={12} /> Clear filters
+          </button>
+        </div>
+      )}
+
       <div className="fj-tabs">
         {[
           ["portfolio", "Portfolio"],
@@ -805,7 +829,7 @@ export default function TradingJournal() {
         <CalendarView trades={trades} filterMarkets={filterMarkets} strategies={strategies} />
       )}
       {view === "heatmaps" && (
-        <HeatmapsView trades={filteredTrades} settings={settings} />
+        <HeatmapsView trades={filteredTrades} settings={settings} strategies={strategies} />
       )}
       {view === "accounts" && (
         <AccountsView accounts={accounts} setAccounts={setAccounts} trades={trades} />
@@ -1916,12 +1940,20 @@ function CalendarView({ trades, filterMarkets, strategies }) {
 
 // ---------- heatmaps ----------
 
-function HeatmapsView({ trades, settings }) {
+function HeatmapsView({ trades, settings, strategies }) {
   if (trades.length === 0) {
     return <div className="fj-empty">No trades match the current filters — log a few trades to see the heatmaps.</div>;
   }
   return (
     <div>
+      <div className="fj-panel">
+        <p className="fj-panel-title">Every trade, plotted</p>
+        <div className="fj-sub" style={{ marginBottom: 12 }}>
+          Each dot is one trade in chronological order — P&amp;L on the Y axis, trade sequence on the X axis. Good for spotting outliers, clustering, and whether size or timing is driving results.
+        </div>
+        <TradeScatterChart trades={trades} settings={settings} strategies={strategies} />
+      </div>
+
       <div className="fj-panel">
         <p className="fj-panel-title">Trade sequence by market</p>
         <div className="fj-sub" style={{ marginBottom: 12 }}>
@@ -1944,6 +1976,88 @@ function HeatmapsView({ trades, settings }) {
           One square per calendar day. Darker means a bigger day, green for net winning days, red for net losing days.
         </div>
         <CalendarHeatmap trades={trades} />
+      </div>
+    </div>
+  );
+}
+
+function TradeScatterChart({ trades, settings, strategies }) {
+  const [colorMode, setColorMode] = useState("outcome"); // outcome | market | strategy
+
+  const sorted = [...trades].sort(
+    (a, b) => new Date(`${a.date}T${a.time || "00:00"}`) - new Date(`${b.date}T${b.time || "00:00"}`)
+  );
+  const data = sorted.map((t, idx) => ({ i: idx + 1, pnl: t.pnl, date: t.date, market: t.market, strategy: t.strategy || "—", id: t.id }));
+
+  const colorFor = (point) => {
+    if (colorMode === "market") return settings[point.market]?.accent || "#8B929E";
+    if (colorMode === "strategy") {
+      if (point.strategy === "—") return "#8B929E";
+      const idx = strategies.indexOf(point.strategy);
+      return ACCENT_PALETTE[idx >= 0 ? idx % ACCENT_PALETTE.length : 0];
+    }
+    return point.pnl >= 0 ? "#5FA37A" : "#C2634A";
+  };
+
+  const legendItems = useMemo(() => {
+    if (colorMode === "market") {
+      return Object.keys(settings).map((m) => ({ label: m, color: settings[m].accent }));
+    }
+    if (colorMode === "strategy") {
+      const items = strategies.map((s, idx) => ({ label: s, color: ACCENT_PALETTE[idx % ACCENT_PALETTE.length] }));
+      if (data.some((d) => d.strategy === "—")) items.push({ label: "No strategy", color: "#8B929E" });
+      return items;
+    }
+    return [
+      { label: "Win", color: "#5FA37A" },
+      { label: "Loss", color: "#C2634A" },
+    ];
+  }, [colorMode, settings, strategies, data]);
+
+  return (
+    <div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 12 }}>
+        <span className="fj-sub" style={{ marginRight: 2 }}>Color by:</span>
+        {[["outcome", "Win / Loss"], ["market", "Market"], ["strategy", "Strategy"]].map(([key, label]) => (
+          <span key={key} className={`fj-chip ${colorMode === key ? "active" : ""}`} onClick={() => setColorMode(key)}>
+            {label}
+          </span>
+        ))}
+      </div>
+      <ResponsiveContainer width="100%" height={300}>
+        <ScatterChart margin={{ top: 8, right: 12, left: -10, bottom: 0 }}>
+          <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
+          <XAxis type="number" dataKey="i" name="Trade #" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+          <YAxis type="number" dataKey="pnl" name="P&L" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+          <ReferenceLine y={0} stroke="#3A4150" />
+          <Tooltip
+            cursor={{ strokeDasharray: "3 3", stroke: "#3A4150" }}
+            contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+            labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
+            itemStyle={{ color: "#E7E5E0" }}
+            formatter={(value, name, props) => {
+              if (name === "pnl") return [money(value), "P&L"];
+              return [value, name];
+            }}
+            labelFormatter={(i, payload) => {
+              const p = payload && payload[0] && payload[0].payload;
+              return p ? `Trade #${i} · ${p.date} · ${p.market} · ${p.strategy}` : `Trade #${i}`;
+            }}
+          />
+          <Scatter data={data} isAnimationActive={false}>
+            {data.map((point) => (
+              <Cell key={point.id} fill={colorFor(point)} fillOpacity={0.85} />
+            ))}
+          </Scatter>
+        </ScatterChart>
+      </ResponsiveContainer>
+      <div className="fj-legend-row">
+        {legendItems.map((item) => (
+          <span key={item.label} className="fj-legend-item">
+            <span className="fj-legend-swatch" style={{ background: item.color }} />
+            {item.label}
+          </span>
+        ))}
       </div>
     </div>
   );
