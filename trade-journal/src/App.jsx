@@ -1004,33 +1004,31 @@ function SettingsPanel({ settings, setSettings, onClose }) {
         <button className="fj-iconbtn" onClick={onClose}><X size={16} /></button>
       </div>
 
-      <div className="fj-form-row" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(190px,1fr))" }}>
+      <div className="fj-form-row" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(210px,1fr))" }}>
         {markets.map((m) => (
-          <div key={m} className="fj-form-field">
-            <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <span>{m} — {settings[m].label}</span>
+          <div key={m} className="fj-form-field" style={{ minWidth: 0 }}>
+            <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6 }}>
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{m} — {settings[m].label}</span>
               <button
-                type="button" className="fj-iconbtn" style={{ padding: 2 }}
+                type="button" className="fj-iconbtn" style={{ padding: 2, flexShrink: 0 }}
                 onClick={() => removeMarket(m)} title={`Remove ${m}`}
               >
                 <Trash2 size={12} />
               </button>
             </label>
-            <div style={{ display: "flex", gap: 6 }}>
-              <input
-                type="number" step="0.01" className="fj-input" style={{ flex: 1 }}
-                value={settings[m].multiplier}
-                onChange={(e) => setSettings((s) => ({ ...s, [m]: { ...s[m], multiplier: e.target.value } }))}
-              />
-              <select
-                className="fj-select" style={{ width: 90, fontSize: 11.5 }}
-                value={settings[m].category || "micro"}
-                onChange={(e) => setSettings((s) => ({ ...s, [m]: { ...s[m], category: e.target.value } }))}
-              >
-                <option value="micro">Micro</option>
-                <option value="mini">Mini</option>
-              </select>
-            </div>
+            <input
+              type="number" step="0.01" className="fj-input" style={{ width: "100%", marginBottom: 6 }}
+              value={settings[m].multiplier}
+              onChange={(e) => setSettings((s) => ({ ...s, [m]: { ...s[m], multiplier: e.target.value } }))}
+            />
+            <select
+              className="fj-select" style={{ width: "100%", fontSize: 11.5 }}
+              value={settings[m].category || "micro"}
+              onChange={(e) => setSettings((s) => ({ ...s, [m]: { ...s[m], category: e.target.value } }))}
+            >
+              <option value="micro">Micro</option>
+              <option value="mini">Mini</option>
+            </select>
           </div>
         ))}
       </div>
