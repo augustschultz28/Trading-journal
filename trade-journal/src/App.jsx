@@ -1999,7 +1999,7 @@ function HeatmapsView({ trades, settings, strategies }) {
       <div className="fj-panel">
         <p className="fj-panel-title">Every trade, plotted</p>
         <div className="fj-sub" style={{ marginBottom: 12 }}>
-          Each dot is one trade in chronological order — P&amp;L on the Y axis, trade sequence on the X axis. Good for spotting outliers, clustering, and whether size or timing is driving results.
+          Each dot is one trade — P&amp;L on the Y axis, spread horizontally only so overlapping trades stay visible. Good for spotting outliers, clustering, and whether size or timing is driving results.
         </div>
         <TradeScatterChart trades={trades} settings={settings} strategies={strategies} />
       </div>
@@ -2033,11 +2033,28 @@ function HeatmapsView({ trades, settings, strategies }) {
 
 function TradeScatterChart({ trades, settings, strategies }) {
   const [colorMode, setColorMode] = useState("outcome"); // outcome | market | strategy
+  const [highlighted, setHighlighted] = useState(null);
+
+  const selectColorMode = (mode) => { setColorMode(mode); setHighlighted(null); };
 
   const sorted = [...trades].sort(
     (a, b) => new Date(`${a.date}T${a.time || "00:00"}`) - new Date(`${b.date}T${b.time || "00:00"}`)
   );
-  const data = sorted.map((t, idx) => ({ i: idx + 1, pnl: t.pnl, date: t.date, market: t.market, strategy: t.strategy || "—", id: t.id }));
+  const data = sorted.map((t, idx) => ({
+    i: idx + 1,
+    x: (idx * 0.6180339887) % 1, // deterministic jitter (golden-ratio spacing) so points don't stack in a single line
+    pnl: t.pnl,
+    date: t.date,
+    market: t.market,
+    strategy: t.strategy || "—",
+    id: t.id,
+  }));
+
+  const groupOf = (point) => {
+    if (colorMode === "market") return point.market;
+    if (colorMode === "strategy") return point.strategy === "—" ? "No strategy" : point.strategy;
+    return point.pnl >= 0 ? "Win" : "Loss";
+  };
 
   const colorFor = (point) => {
     if (colorMode === "market") return settings[point.market]?.accent || "#8B929E";
@@ -2048,6 +2065,8 @@ function TradeScatterChart({ trades, settings, strategies }) {
     }
     return point.pnl >= 0 ? "#5FA37A" : "#C2634A";
   };
+
+  const toggleHighlight = (label) => setHighlighted((h) => h === label ? null : label);
 
   const legendItems = useMemo(() => {
     if (colorMode === "market") {
@@ -2069,63 +2088,93 @@ function TradeScatterChart({ trades, settings, strategies }) {
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 12 }}>
         <span className="fj-sub" style={{ marginRight: 2 }}>Color by:</span>
         {[["outcome", "Win / Loss"], ["market", "Market"], ["strategy", "Strategy"]].map(([key, label]) => (
-          <span key={key} className={`fj-chip ${colorMode === key ? "active" : ""}`} onClick={() => setColorMode(key)}>
+          <span key={key} className={`fj-chip ${colorMode === key ? "active" : ""}`} onClick={() => selectColorMode(key)}>
             {label}
           </span>
         ))}
+        {highlighted && (
+          <span className="fj-chip" onClick={() => setHighlighted(null)}>Clear highlight</span>
+        )}
       </div>
-      <ResponsiveContainer width="100%" height={300}>
-        <ScatterChart margin={{ top: 8, right: 12, left: -10, bottom: 0 }}>
-          <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
-          <XAxis type="number" dataKey="i" name="Trade #" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-          <YAxis type="number" dataKey="pnl" name="P&L" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-          <ReferenceLine y={0} stroke="#3A4150" />
-          <Tooltip
-            cursor={{ strokeDasharray: "3 3", stroke: "#3A4150" }}
-            contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
-            labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
-            itemStyle={{ color: "#E7E5E0" }}
-            formatter={(value, name, props) => {
-              if (name === "pnl") return [money(value), "P&L"];
-              return [value, name];
-            }}
-            labelFormatter={(i, payload) => {
-              const p = payload && payload[0] && payload[0].payload;
-              return p ? `Trade #${i} · ${p.date} · ${p.market} · ${p.strategy}` : `Trade #${i}`;
-            }}
-          />
-          <Scatter data={data} isAnimationActive={false}>
-            {data.map((point) => (
-              <Cell key={point.id} fill={colorFor(point)} fillOpacity={0.85} />
-            ))}
-          </Scatter>
-        </ScatterChart>
-      </ResponsiveContainer>
+      <div style={{ maxWidth: 360, margin: "0 auto" }}>
+        <ResponsiveContainer width="100%" height={340}>
+          <ScatterChart margin={{ top: 8, right: 20, left: -10, bottom: 0 }}>
+            <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" horizontal={true} vertical={false} />
+            <XAxis type="number" dataKey="x" domain={[-0.15, 1.15]} hide />
+            <YAxis type="number" dataKey="pnl" name="P&L" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+            <ReferenceLine y={0} stroke="#3A4150" />
+            <Tooltip
+              cursor={{ strokeDasharray: "3 3", stroke: "#3A4150" }}
+              contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+              labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
+              itemStyle={{ color: "#E7E5E0" }}
+              formatter={(value, name) => {
+                if (name === "pnl") return [money(value), "P&L"];
+                return [value, name];
+              }}
+              labelFormatter={(_, payload) => {
+                const p = payload && payload[0] && payload[0].payload;
+                return p ? `Trade #${p.i} · ${p.date} · ${p.market} · ${p.strategy}` : "";
+              }}
+            />
+            <Scatter data={data} isAnimationActive={false}>
+              {data.map((point) => {
+                const dimmed = highlighted && groupOf(point) !== highlighted;
+                return (
+                  <Cell
+                    key={point.id}
+                    fill={dimmed ? "#3A4150" : colorFor(point)}
+                    fillOpacity={dimmed ? 0.25 : 0.9}
+                  />
+                );
+              })}
+            </Scatter>
+          </ScatterChart>
+        </ResponsiveContainer>
+      </div>
       <div className="fj-legend-row">
-        {legendItems.map((item) => (
-          <span key={item.label} className="fj-legend-item">
-            <span className="fj-legend-swatch" style={{ background: item.color }} />
-            {item.label}
-          </span>
-        ))}
+        {legendItems.map((item) => {
+          const isActive = highlighted === item.label;
+          const isDimmed = highlighted && !isActive;
+          return (
+            <span
+              key={item.label}
+              className="fj-legend-item"
+              onClick={() => toggleHighlight(item.label)}
+              style={{
+                cursor: "pointer",
+                opacity: isDimmed ? 0.4 : 1,
+                fontWeight: isActive ? 700 : 400,
+                color: isActive ? "#E7E5E0" : undefined,
+              }}
+              title={isActive ? `Showing only ${item.label} — click to clear` : `Click to highlight ${item.label}`}
+            >
+              <span className="fj-legend-swatch" style={{ background: item.color, boxShadow: isActive ? "0 0 0 2px rgba(231,229,224,0.5)" : "none" }} />
+              {item.label}
+            </span>
+          );
+        })}
       </div>
     </div>
   );
 }
 
 function TradeSequenceHeatmap({ trades, settings }) {
-  const maxAbs = Math.max(1, ...trades.map((t) => Math.abs(t.pnl)));
   const rows = Object.keys(settings).map((m) => {
     const marketTrades = trades
       .filter((t) => t.market === m)
       .sort((a, b) => new Date(`${a.date}T${a.time || "00:00"}`) - new Date(`${b.date}T${b.time || "00:00"}`));
-    return { market: m, accent: settings[m].accent, trades: marketTrades };
+    const marketMaxAbs = Math.max(1, ...marketTrades.map((t) => Math.abs(t.pnl)));
+    return { market: m, accent: settings[m].accent, trades: marketTrades, maxAbs: marketMaxAbs };
   }).filter((r) => r.trades.length > 0);
 
   if (rows.length === 0) return <div className="fj-empty">No trades yet.</div>;
 
   return (
     <div style={{ overflowX: "auto" }}>
+      <div className="fj-sub" style={{ marginBottom: 10 }}>
+        Each market's color scale is normalized to its own biggest trade — a market with smaller typical size won't look duller just because another market trades bigger.
+      </div>
       {rows.map((r) => (
         <div key={r.market} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <div style={{ width: 46, flexShrink: 0, fontFamily: "Space Grotesk, sans-serif", fontWeight: 700, fontSize: 12.5, display: "flex", alignItems: "center", gap: 5 }}>
@@ -2139,7 +2188,7 @@ function TradeSequenceHeatmap({ trades, settings }) {
                 title={`${t.date}${t.time ? " " + t.time : ""} · ${t.strategy || "no strategy"} · ${money(t.pnl)}`}
                 style={{
                   width: 15, height: 15, borderRadius: 3,
-                  background: heatColor(t.pnl, maxAbs),
+                  background: heatColor(t.pnl, r.maxAbs),
                   border: "1px solid #2B303A",
                   cursor: "default",
                 }}
