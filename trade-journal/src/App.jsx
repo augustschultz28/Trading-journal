@@ -9,11 +9,11 @@ import Papa from "papaparse";
 // ---------- constants ----------
 
 const DEFAULT_SETTINGS = {
-  MES: { label: "Micro E-mini S&P 500", multiplier: 5, accent: "#6C93AD" },
-  MNQ: { label: "Micro E-mini Nasdaq-100", multiplier: 2, accent: "#9385C9" },
-  MCL: { label: "Micro WTI Crude Oil", multiplier: 100, accent: "#D9A441" },
-  MGC: { label: "Micro Gold", multiplier: 10, accent: "#C7B15A" },
-  M2K: { label: "Micro Russell 2000", multiplier: 5, accent: "#7FAE8E" },
+  MES: { label: "Micro E-mini S&P 500", multiplier: 5, accent: "#6C93AD", category: "micro" },
+  MNQ: { label: "Micro E-mini Nasdaq-100", multiplier: 2, accent: "#9385C9", category: "micro" },
+  MCL: { label: "Micro WTI Crude Oil", multiplier: 100, accent: "#D9A441", category: "micro" },
+  MGC: { label: "Micro Gold", multiplier: 10, accent: "#C7B15A", category: "micro" },
+  M2K: { label: "Micro Russell 2000", multiplier: 5, accent: "#7FAE8E", category: "micro" },
 };
 
 const TRADES_KEY = "futures_journal_trades_v1";
@@ -328,9 +328,6 @@ export default function TradingJournal() {
       return true;
     });
   }, [trades, filterMarkets, filterStrategies, filterAccounts, dateFrom, dateTo]);
-
-  const portfolioStats = useMemo(() => calcStats(filteredTrades), [filteredTrades]);
-  const curve = useMemo(() => equityCurve(filteredTrades), [filteredTrades]);
 
   const byMarket = useMemo(() => {
     return Object.keys(settings).map((m) => {
@@ -816,7 +813,7 @@ export default function TradingJournal() {
       )}
 
       {view === "portfolio" && (
-        <PortfolioView stats={portfolioStats} curve={curve} byMarket={byMarket} byStrategy={byStrategy} settings={settings} trades={filteredTrades} strategies={strategies} />
+        <PortfolioView settings={settings} trades={filteredTrades} strategies={strategies} />
       )}
       {view === "strategy" && <GroupCards groups={byStrategy} emptyLabel="No strategies logged yet." />}
       {view === "market" && (
@@ -974,6 +971,7 @@ function SettingsPanel({ settings, setSettings, onClose }) {
   const [newSymbol, setNewSymbol] = useState("");
   const [newLabel, setNewLabel] = useState("");
   const [newMultiplier, setNewMultiplier] = useState("");
+  const [newCategory, setNewCategory] = useState("micro");
   const [error, setError] = useState("");
 
   const markets = Object.keys(settings);
@@ -986,9 +984,9 @@ function SettingsPanel({ settings, setSettings, onClose }) {
     const accent = ACCENT_PALETTE[markets.length % ACCENT_PALETTE.length];
     setSettings((s) => ({
       ...s,
-      [sym]: { label: newLabel.trim() || sym, multiplier: Number(newMultiplier) || 1, accent },
+      [sym]: { label: newLabel.trim() || sym, multiplier: Number(newMultiplier) || 1, accent, category: newCategory },
     }));
-    setNewSymbol(""); setNewLabel(""); setNewMultiplier(""); setError("");
+    setNewSymbol(""); setNewLabel(""); setNewMultiplier(""); setNewCategory("micro"); setError("");
   };
 
   const removeMarket = (sym) => {
@@ -1006,7 +1004,7 @@ function SettingsPanel({ settings, setSettings, onClose }) {
         <button className="fj-iconbtn" onClick={onClose}><X size={16} /></button>
       </div>
 
-      <div className="fj-form-row" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(170px,1fr))" }}>
+      <div className="fj-form-row" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(190px,1fr))" }}>
         {markets.map((m) => (
           <div key={m} className="fj-form-field">
             <label style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -1018,31 +1016,48 @@ function SettingsPanel({ settings, setSettings, onClose }) {
                 <Trash2 size={12} />
               </button>
             </label>
-            <input
-              type="number" step="0.01" className="fj-input"
-              value={settings[m].multiplier}
-              onChange={(e) => setSettings((s) => ({ ...s, [m]: { ...s[m], multiplier: e.target.value } }))}
-            />
+            <div style={{ display: "flex", gap: 6 }}>
+              <input
+                type="number" step="0.01" className="fj-input" style={{ flex: 1 }}
+                value={settings[m].multiplier}
+                onChange={(e) => setSettings((s) => ({ ...s, [m]: { ...s[m], multiplier: e.target.value } }))}
+              />
+              <select
+                className="fj-select" style={{ width: 90, fontSize: 11.5 }}
+                value={settings[m].category || "micro"}
+                onChange={(e) => setSettings((s) => ({ ...s, [m]: { ...s[m], category: e.target.value } }))}
+              >
+                <option value="micro">Micro</option>
+                <option value="mini">Mini</option>
+              </select>
+            </div>
           </div>
         ))}
       </div>
 
       <div className="fj-sub" style={{ margin: "10px 0" }}>
-        These only affect the optional entry/exit calculator in the trade form — P&amp;L is always stored as a plain number you can edit directly. Removing a market keeps any trades already logged under it in your journal, but hides it from the ticker strip and By Market breakdown.
+        Point values only affect the optional entry/exit calculator in the trade form — P&amp;L is always stored as a plain number you can edit directly. Micro/Mini controls the toggle on the Portfolio tab. Removing a market keeps any trades already logged under it in your journal, but hides it from the ticker strip and By Market breakdown.
       </div>
 
-      <form onSubmit={addMarket} className="fj-form-row" style={{ gridTemplateColumns: "90px 1fr 110px auto", alignItems: "end", marginBottom: 0 }}>
+      <form onSubmit={addMarket} className="fj-form-row" style={{ gridTemplateColumns: "90px 1fr 100px 100px auto", alignItems: "end", marginBottom: 0 }}>
         <div className="fj-form-field">
           <label>Symbol</label>
-          <input className="fj-input" placeholder="M2K" value={newSymbol} onChange={(e) => setNewSymbol(e.target.value)} />
+          <input className="fj-input" placeholder="RTY" value={newSymbol} onChange={(e) => setNewSymbol(e.target.value)} />
         </div>
         <div className="fj-form-field">
           <label>Name</label>
-          <input className="fj-input" style={{ fontFamily: "Inter, sans-serif" }} placeholder="Micro Russell 2000" value={newLabel} onChange={(e) => setNewLabel(e.target.value)} />
+          <input className="fj-input" style={{ fontFamily: "Inter, sans-serif" }} placeholder="E-mini Russell 2000" value={newLabel} onChange={(e) => setNewLabel(e.target.value)} />
         </div>
         <div className="fj-form-field">
           <label>$/point</label>
-          <input type="number" step="0.01" className="fj-input" placeholder="5" value={newMultiplier} onChange={(e) => setNewMultiplier(e.target.value)} />
+          <input type="number" step="0.01" className="fj-input" placeholder="50" value={newMultiplier} onChange={(e) => setNewMultiplier(e.target.value)} />
+        </div>
+        <div className="fj-form-field">
+          <label>Size</label>
+          <select className="fj-select" value={newCategory} onChange={(e) => setNewCategory(e.target.value)}>
+            <option value="micro">Micro</option>
+            <option value="mini">Mini</option>
+          </select>
         </div>
         <button type="submit" className="fj-btn primary" style={{ height: 37 }}><Plus size={14} /> Add market</button>
       </form>
@@ -1196,15 +1211,52 @@ function PortfolioEquityChart({ data, strategies, visible, colorFor }) {
 
 // ---------- portfolio view ----------
 
-function PortfolioView({ stats, byMarket, byStrategy, settings, trades, strategies }) {
-  const barData = byMarket.map((m) => ({ name: m.key, pnl: m.stats.totalPnl, fill: m.accent }));
+function PortfolioView({ settings, trades, strategies }) {
   const [visibleStrategies, setVisibleStrategies] = useState([]);
-  const multiCurve = useMemo(() => buildMultiEquityCurve(trades, strategies), [trades, strategies]);
+  const [category, setCategory] = useState("all"); // all | micro | mini
+
+  const hasMicro = Object.values(settings).some((m) => (m.category || "micro") === "micro");
+  const hasMini = Object.values(settings).some((m) => m.category === "mini");
+
+  const scopedTrades = useMemo(() => {
+    if (category === "all") return trades;
+    return trades.filter((t) => (settings[t.market]?.category || "micro") === category);
+  }, [trades, settings, category]);
+
+  const stats = useMemo(() => calcStats(scopedTrades), [scopedTrades]);
+  const multiCurve = useMemo(() => buildMultiEquityCurve(scopedTrades, strategies), [scopedTrades, strategies]);
+
+  const byMarket = useMemo(() => {
+    return Object.keys(settings)
+      .filter((m) => category === "all" || (settings[m].category || "micro") === category)
+      .map((m) => {
+        const marketTrades = scopedTrades.filter((t) => t.market === m);
+        return { key: m, ...settings[m], stats: calcStats(marketTrades) };
+      });
+  }, [settings, scopedTrades, category]);
+
+  const byStrategy = useMemo(() => {
+    const names = Array.from(new Set(scopedTrades.map((t) => t.strategy).filter(Boolean)));
+    return names
+      .map((s) => ({ key: s, stats: calcStats(scopedTrades.filter((t) => t.strategy === s)) }))
+      .sort((a, b) => b.stats.totalPnl - a.stats.totalPnl);
+  }, [scopedTrades]);
+
+  const barData = byMarket.map((m) => ({ name: m.key, pnl: m.stats.totalPnl, fill: m.accent }));
   const colorFor = (s) => ACCENT_PALETTE[strategies.indexOf(s) % ACCENT_PALETTE.length];
   const toggleStrategy = (s) => setVisibleStrategies((v) => v.includes(s) ? v.filter((x) => x !== s) : [...v, s]);
 
   return (
     <div>
+      {(hasMicro && hasMini) && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
+          <div className="fj-seg-toggle">
+            <button className={`fj-seg-btn ${category === "all" ? "active" : ""}`} onClick={() => setCategory("all")}>All contracts</button>
+            <button className={`fj-seg-btn ${category === "micro" ? "active" : ""}`} onClick={() => setCategory("micro")}>Micro only</button>
+            <button className={`fj-seg-btn ${category === "mini" ? "active" : ""}`} onClick={() => setCategory("mini")}>Mini only</button>
+          </div>
+        </div>
+      )}
       <StatGrid stats={stats} />
       <div className="fj-panel">
         <p className="fj-panel-title">Equity curve</p>
@@ -1235,7 +1287,7 @@ function PortfolioView({ stats, byMarket, byStrategy, settings, trades, strategi
       <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: 14 }}>
         <div className="fj-panel">
           <p className="fj-panel-title">P&amp;L by market</p>
-          {byMarket.every((m) => m.stats.n === 0) ? (
+          {byMarket.length === 0 || byMarket.every((m) => m.stats.n === 0) ? (
             <div className="fj-empty">No trades yet.</div>
           ) : (
             <ResponsiveContainer width="100%" height={180}>
@@ -1305,6 +1357,7 @@ function GroupCards({ groups, emptyLabel }) {
             <div className="fj-strat-row"><span>Win rate</span><b>{hasTrades ? pct(g.stats.winRate) : "—"}</b></div>
             <div className="fj-strat-row"><span>Profit factor</span><b>{g.stats.profitFactor === null ? "—" : g.stats.profitFactor === Infinity ? "∞" : g.stats.profitFactor.toFixed(2)}</b></div>
             <div className="fj-strat-row"><span>Expectancy</span><b className={g.stats.expectancy >= 0 ? "fj-profit" : "fj-loss"}>{hasTrades ? money(g.stats.expectancy) : "—"}</b></div>
+            <div className="fj-strat-row"><span>Max drawdown</span><b className="fj-loss">{hasTrades ? money(-g.stats.maxDD) : "—"}</b></div>
 
             {isOpen && (
               <div style={{ marginTop: 10 }}>
@@ -1312,7 +1365,6 @@ function GroupCards({ groups, emptyLabel }) {
                 <div className="fj-strat-row"><span>Avg loss</span><b className="fj-loss">{money(-g.stats.avgLoss)}</b></div>
                 <div className="fj-strat-row"><span>Largest win</span><b className="fj-profit">{money(g.stats.largestWin)}</b></div>
                 <div className="fj-strat-row"><span>Largest loss</span><b className="fj-loss">{money(g.stats.largestLoss)}</b></div>
-                <div className="fj-strat-row"><span>Max drawdown</span><b className="fj-loss">{money(-g.stats.maxDD)}</b></div>
                 <div className="fj-strat-row"><span>Longest win streak</span><b className="fj-profit">{g.stats.maxWinStreak} trade{g.stats.maxWinStreak === 1 ? "" : "s"}</b></div>
                 <div className="fj-strat-row"><span>Longest loss streak</span><b className="fj-loss">{g.stats.maxLossStreak} trade{g.stats.maxLossStreak === 1 ? "" : "s"}</b></div>
               </div>
