@@ -3,7 +3,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, BarChart, Bar, ReferenceLine, ScatterChart, Scatter, Cell
 } from "recharts";
-import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, RotateCcw, Settings2, ChevronDown, ChevronUp, Upload, Download } from "lucide-react";
+import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, RotateCcw, Settings2, ChevronLeft, ChevronRight, ArrowLeft, Upload, Download } from "lucide-react";
 import Papa from "papaparse";
 
 // ---------- constants ----------
@@ -24,6 +24,7 @@ const uid = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(
 
 const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const DOW_LABELS_SHORT = ["S", "M", "T", "W", "T", "F", "S"];
+const DOW_LABELS_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
 function heatColor(value, maxAbs) {
   if (!maxAbs || value === 0 || value === null || value === undefined) return "rgba(139,146,158,0.08)";
@@ -280,16 +281,12 @@ export default function TradingJournal() {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [accounts, setAccounts] = useState([]);
 
-  const [view, setView] = useState("portfolio"); // portfolio | strategy | market | calendar | heatmaps | accounts | log
+  const [view, setView] = useState("home"); // home | calendar | accounts | log
+  const [selectedEntity, setSelectedEntity] = useState(null); // { type: 'strategy'|'market', key } | null
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
 
-  const [filterMarkets, setFilterMarkets] = useState([]); // empty = all
-  const [filterStrategies, setFilterStrategies] = useState([]);
-  const [filterAccounts, setFilterAccounts] = useState([]);
-  const [dateFrom, setDateFrom] = useState("");
-  const [dateTo, setDateTo] = useState("");
   const [importPreview, setImportPreview] = useState(null); // { parsed, errorCount, total }
   const fileInputRef = useRef(null);
   const [restorePreview, setRestorePreview] = useState(null); // { data, tradeCount, accountCount } | { error }
@@ -317,56 +314,6 @@ export default function TradingJournal() {
     () => Array.from(new Set(trades.map((t) => t.strategy).filter(Boolean))).sort(),
     [trades]
   );
-
-  const filteredTrades = useMemo(() => {
-    return trades.filter((t) => {
-      if (filterMarkets.length && !filterMarkets.includes(t.market)) return false;
-      if (filterStrategies.length && !filterStrategies.includes(t.strategy)) return false;
-      if (filterAccounts.length && !(t.accounts || []).some((a) => filterAccounts.includes(a))) return false;
-      if (dateFrom && t.date < dateFrom) return false;
-      if (dateTo && t.date > dateTo) return false;
-      return true;
-    });
-  }, [trades, filterMarkets, filterStrategies, filterAccounts, dateFrom, dateTo]);
-
-  const byMarket = useMemo(() => {
-    return Object.keys(settings).map((m) => {
-      const marketTrades = trades.filter((t) => t.market === m);
-      return {
-        key: m,
-        ...settings[m],
-        stats: calcStats(marketTrades),
-        curve: equityCurve(marketTrades),
-        trades: marketTrades,
-      };
-    });
-  }, [trades, settings]);
-
-  const byStrategy = useMemo(() => {
-    return strategies.map((s) => {
-      const strategyTrades = trades.filter((t) => t.strategy === s);
-      return {
-        key: s,
-        stats: calcStats(strategyTrades),
-        curve: equityCurve(strategyTrades),
-        trades: strategyTrades,
-      };
-    }).sort((a, b) => b.stats.totalPnl - a.stats.totalPnl);
-  }, [strategies, trades]);
-
-  const resetFilters = () => {
-    setFilterMarkets([]); setFilterStrategies([]); setFilterAccounts([]); setDateFrom(""); setDateTo("");
-  };
-
-  const toggleMarketFilter = (m) => {
-    setFilterMarkets((prev) => prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m]);
-  };
-  const toggleStrategyFilter = (s) => {
-    setFilterStrategies((prev) => prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]);
-  };
-  const toggleAccountFilter = (a) => {
-    setFilterAccounts((prev) => prev.includes(a) ? prev.filter((x) => x !== a) : [...prev, a]);
-  };
 
   const handleSave = (trade) => {
     setTrades((prev) => {
@@ -465,7 +412,7 @@ export default function TradingJournal() {
   const confirmImport = (mode) => {
     if (!importPreview) return;
     if (mode === "append") setTrades((prev) => [...prev, ...importPreview.parsed]);
-    if (mode === "replace") { setTrades(importPreview.parsed); resetFilters(); }
+    if (mode === "replace") { setTrades(importPreview.parsed); setSelectedEntity(null); setView("home"); }
     setImportPreview(null);
   };
 
@@ -521,7 +468,8 @@ export default function TradingJournal() {
     setTrades(Array.isArray(data.trades) ? data.trades : []);
     setAccounts(Array.isArray(data.accounts) ? data.accounts : []);
     setSettings({ ...DEFAULT_SETTINGS, ...(data.settings || {}) });
-    resetFilters();
+    setSelectedEntity(null);
+    setView("home");
     setRestorePreview(null);
   };
 
@@ -622,6 +570,16 @@ export default function TradingJournal() {
 
         .fj-cards-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(230px,1fr)); gap:12px; }
         .fj-strat-card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px; }
+        .fj-strat-card-clickable { cursor:pointer; transition:border-color .15s, transform .1s; }
+        .fj-strat-card-clickable:hover { border-color:var(--amber); transform:translateY(-2px); }
+        .fj-strat-pnl-big { font-family:'JetBrains Mono',monospace; font-size:19px; font-weight:700; margin-top:2px; }
+        .fj-strat-meta-row { display:flex; gap:12px; margin-top:5px; margin-bottom:8px; font-size:11px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
+        .fj-section-label { font-family:'Space Grotesk',sans-serif; font-weight:600; font-size:13px; color:var(--text-dim); margin:22px 0 10px; text-transform:uppercase; letter-spacing:0.5px; }
+
+        .fj-back-btn { display:flex; align-items:center; gap:6px; background:none; border:none; color:var(--text-dim); cursor:pointer; font-size:13px; padding:6px 0; margin-bottom:14px; font-family:'Inter',sans-serif; }
+        .fj-back-btn:hover { color:var(--text); }
+        .fj-detail-head { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:16px; flex-wrap:wrap; gap:10px; }
+        .fj-detail-title { font-family:'Space Grotesk',sans-serif; font-size:22px; font-weight:700; margin-top:2px; }
         .fj-strat-name { font-family:'Space Grotesk',sans-serif; font-weight:600; font-size:14.5px; margin-bottom:8px; }
         .fj-strat-row { display:flex; justify-content:space-between; font-size:12.5px; color:var(--text-dim); padding:2px 0; }
         .fj-strat-row b { color: var(--text); font-family:'JetBrains Mono',monospace; font-weight:500; }
@@ -674,9 +632,6 @@ export default function TradingJournal() {
         .fj-legend-row { display:flex; flex-wrap:wrap; gap:12px; margin-top:12px; }
         .fj-legend-item { display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
         .fj-legend-swatch { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
-
-        .fj-filter-banner { display:flex; justify-content:space-between; align-items:center; gap:10px; background:rgba(217,164,65,0.12);
-          border:1px solid rgba(217,164,65,0.4); border-radius:8px; padding:8px 12px; margin-bottom:14px; font-size:12.5px; color:var(--amber); }
 
         .fj-empty { color:var(--text-dim); font-size:13px; text-align:center; padding:30px 10px; }
 
@@ -759,35 +714,10 @@ export default function TradingJournal() {
         <SettingsPanel settings={settings} setSettings={setSettings} onClose={() => setShowSettings(false)} />
       )}
 
-      <TickerStrip
-        byMarket={byMarket}
-        activeMarkets={filterMarkets}
-        onToggle={toggleMarketFilter}
-      />
-
-      {(filterMarkets.length > 0 || filterStrategies.length > 0 || filterAccounts.length > 0 || dateFrom || dateTo) && (
-        <div className="fj-filter-banner">
-          <span>
-            Filtered — {[
-              filterMarkets.length > 0 && `${filterMarkets.length} market${filterMarkets.length === 1 ? "" : "s"}`,
-              filterStrategies.length > 0 && `${filterStrategies.length} strateg${filterStrategies.length === 1 ? "y" : "ies"}`,
-              filterAccounts.length > 0 && `${filterAccounts.length} account${filterAccounts.length === 1 ? "" : "s"}`,
-              (dateFrom || dateTo) && "date range",
-            ].filter(Boolean).join(", ")} — this applies across every tab, including Calendar and Heatmaps.
-          </span>
-          <button className="fj-btn" style={{ padding: "4px 10px" }} onClick={resetFilters}>
-            <RotateCcw size={12} /> Clear filters
-          </button>
-        </div>
-      )}
-
       <div className="fj-tabs">
         {[
-          ["portfolio", "Portfolio"],
-          ["strategy", "By Strategy"],
-          ["market", "By Market"],
+          ["home", "Dashboard"],
           ["calendar", "Calendar"],
-          ["heatmaps", "Heatmaps"],
           ["accounts", "Accounts"],
           ["log", "Trade Log"],
         ].map(([key, label]) => (
@@ -797,42 +727,37 @@ export default function TradingJournal() {
         ))}
       </div>
 
-      {(view === "portfolio" || view === "log" || view === "heatmaps") && (
-        <FilterBar
-          strategies={strategies}
-          accounts={accounts}
-          filterMarkets={filterMarkets}
-          filterStrategies={filterStrategies}
-          filterAccounts={filterAccounts}
-          toggleStrategyFilter={toggleStrategyFilter}
-          toggleAccountFilter={toggleAccountFilter}
-          dateFrom={dateFrom} dateTo={dateTo}
-          setDateFrom={setDateFrom} setDateTo={setDateTo}
-          onReset={resetFilters}
-        />
-      )}
-
-      {view === "portfolio" && (
-        <PortfolioView settings={settings} trades={filteredTrades} strategies={strategies} />
-      )}
-      {view === "strategy" && <GroupCards groups={byStrategy} emptyLabel="No strategies logged yet." />}
-      {view === "market" && (
-        <GroupCards
-          groups={byMarket.map((m) => ({ key: `${m.key} — ${m.label}`, stats: m.stats, curve: m.curve, accent: m.accent, trades: m.trades }))}
-          emptyLabel="No trades logged yet."
-        />
+      {view === "home" && (
+        selectedEntity ? (
+          <DetailView
+            selected={selectedEntity}
+            trades={trades}
+            settings={settings}
+            strategies={strategies}
+            onBack={() => setSelectedEntity(null)}
+            onNavigate={(type, key) => setSelectedEntity({ type, key })}
+            onEdit={startEdit}
+            onDelete={handleDelete}
+          />
+        ) : (
+          <HomeView
+            trades={trades}
+            settings={settings}
+            accounts={accounts}
+            strategies={strategies}
+            onSelect={(type, key) => setSelectedEntity({ type, key })}
+            onViewAccounts={() => setView("accounts")}
+          />
+        )
       )}
       {view === "calendar" && (
-        <CalendarView trades={trades} filterMarkets={filterMarkets} strategies={strategies} />
-      )}
-      {view === "heatmaps" && (
-        <HeatmapsView trades={filteredTrades} settings={settings} strategies={strategies} />
+        <CalendarView trades={trades} strategies={strategies} />
       )}
       {view === "accounts" && (
         <AccountsView accounts={accounts} setAccounts={setAccounts} trades={trades} />
       )}
       {view === "log" && (
-        <TradeLog trades={filteredTrades} onEdit={startEdit} onDelete={handleDelete} />
+        <TradeLogView trades={trades} strategies={strategies} accounts={accounts} settings={settings} onEdit={startEdit} onDelete={handleDelete} />
       )}
 
       {showForm && (
@@ -1064,42 +989,19 @@ function SettingsPanel({ settings, setSettings, onClose }) {
   );
 }
 
-// ---------- ticker strip ----------
-
-function TickerStrip({ byMarket, activeMarkets, onToggle }) {
-  return (
-    <div className="fj-ticker">
-      {byMarket.map((m) => {
-        const active = activeMarkets.includes(m.key);
-        const isProfit = m.stats.totalPnl >= 0;
-        return (
-          <div
-            key={m.key}
-            className={`fj-ticker-card ${active ? "active" : ""}`}
-            style={{ "--dot": m.accent, borderColor: active ? m.accent : undefined }}
-            onClick={() => onToggle(m.key)}
-          >
-            <div className="fj-ticker-top">
-              <span className="fj-ticker-sym"><span className="fj-dot" style={{ background: m.accent }} />{m.key}</span>
-              {m.stats.n > 0 && (isProfit ? <TrendingUp size={14} color="#5FA37A" /> : <TrendingDown size={14} color="#C2634A" />)}
-            </div>
-            <div className={`fj-ticker-pnl ${m.stats.n === 0 ? "fj-neutral" : isProfit ? "fj-profit" : "fj-loss"}`}>
-              {m.stats.n === 0 ? "—" : money(m.stats.totalPnl)}
-            </div>
-            <div className="fj-ticker-meta">{m.stats.n} trade{m.stats.n === 1 ? "" : "s"} · {m.stats.n ? pct(m.stats.winRate) + " win" : "no data"}</div>
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
 // ---------- filter bar ----------
 
-function FilterBar({ strategies, accounts, filterStrategies, filterAccounts, toggleStrategyFilter, toggleAccountFilter, dateFrom, dateTo, setDateFrom, setDateTo, onReset }) {
+function FilterBar({ settings, strategies, accounts, filterMarkets, filterStrategies, filterAccounts, toggleMarketFilter, toggleStrategyFilter, toggleAccountFilter, dateFrom, dateTo, setDateFrom, setDateTo, onReset }) {
+  const markets = Object.keys(settings);
   return (
     <div className="fj-filterbar">
-      <span className="fj-sub" style={{ marginRight: 2 }}>Strategy:</span>
+      <span className="fj-sub" style={{ marginRight: 2 }}>Market:</span>
+      {markets.map((m) => (
+        <span key={m} className={`fj-chip ${filterMarkets.includes(m) ? "active" : ""}`} onClick={() => toggleMarketFilter(m)}>
+          {m}
+        </span>
+      ))}
+      <span className="fj-sub" style={{ marginLeft: 10 }}>Strategy:</span>
       {strategies.length === 0 && <span className="fj-sub">none yet</span>}
       {strategies.map((s) => (
         <span key={s} className={`fj-chip ${filterStrategies.includes(s) ? "active" : ""}`} onClick={() => toggleStrategyFilter(s)}>
@@ -1123,6 +1025,43 @@ function FilterBar({ strategies, accounts, filterStrategies, filterAccounts, tog
       <button className="fj-btn" style={{ marginLeft: "auto", padding: "5px 10px" }} onClick={onReset}>
         <RotateCcw size={13} /> Reset
       </button>
+    </div>
+  );
+}
+
+// ---------- trade log (with its own local filters — not shared across tabs) ----------
+
+function TradeLogView({ trades, strategies, accounts, settings, onEdit, onDelete }) {
+  const [filterMarkets, setFilterMarkets] = useState([]);
+  const [filterStrategies, setFilterStrategies] = useState([]);
+  const [filterAccounts, setFilterAccounts] = useState([]);
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+
+  const toggleMarketFilter = (m) => setFilterMarkets((p) => p.includes(m) ? p.filter((x) => x !== m) : [...p, m]);
+  const toggleStrategyFilter = (s) => setFilterStrategies((p) => p.includes(s) ? p.filter((x) => x !== s) : [...p, s]);
+  const toggleAccountFilter = (a) => setFilterAccounts((p) => p.includes(a) ? p.filter((x) => x !== a) : [...p, a]);
+  const resetFilters = () => { setFilterMarkets([]); setFilterStrategies([]); setFilterAccounts([]); setDateFrom(""); setDateTo(""); };
+
+  const filtered = useMemo(() => trades.filter((t) => {
+    if (filterMarkets.length && !filterMarkets.includes(t.market)) return false;
+    if (filterStrategies.length && !filterStrategies.includes(t.strategy)) return false;
+    if (filterAccounts.length && !(t.accounts || []).some((a) => filterAccounts.includes(a))) return false;
+    if (dateFrom && t.date < dateFrom) return false;
+    if (dateTo && t.date > dateTo) return false;
+    return true;
+  }), [trades, filterMarkets, filterStrategies, filterAccounts, dateFrom, dateTo]);
+
+  return (
+    <div>
+      <FilterBar
+        settings={settings} strategies={strategies} accounts={accounts}
+        filterMarkets={filterMarkets} filterStrategies={filterStrategies} filterAccounts={filterAccounts}
+        toggleMarketFilter={toggleMarketFilter} toggleStrategyFilter={toggleStrategyFilter} toggleAccountFilter={toggleAccountFilter}
+        dateFrom={dateFrom} dateTo={dateTo} setDateFrom={setDateFrom} setDateTo={setDateTo}
+        onReset={resetFilters}
+      />
+      <TradeLog trades={filtered} onEdit={onEdit} onDelete={onDelete} />
     </div>
   );
 }
@@ -1209,9 +1148,40 @@ function PortfolioEquityChart({ data, strategies, visible, colorFor }) {
 
 // ---------- portfolio view ----------
 
-function PortfolioView({ settings, trades, strategies }) {
+const GROUP_SORT_OPTIONS = [
+  ["pnl", "P&L"],
+  ["pf", "Profit Factor"],
+  ["trades", "Trades"],
+  ["winRate", "Win Rate"],
+];
+
+function sortGroups(list, sortKey) {
+  const pfValue = (s) => s.profitFactor === null ? -Infinity : s.profitFactor === Infinity ? Infinity : s.profitFactor;
+  return [...list].sort((a, b) => {
+    if (sortKey === "trades") return b.stats.n - a.stats.n;
+    if (sortKey === "winRate") return b.stats.winRate - a.stats.winRate;
+    if (sortKey === "pf") return pfValue(b.stats) - pfValue(a.stats);
+    return b.stats.totalPnl - a.stats.totalPnl;
+  });
+}
+
+function SortToggle({ value, onChange }) {
+  return (
+    <div className="fj-seg-toggle">
+      {GROUP_SORT_OPTIONS.map(([key, label]) => (
+        <button key={key} className={`fj-seg-btn ${value === key ? "active" : ""}`} onClick={() => onChange(key)}>
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAccounts }) {
   const [visibleStrategies, setVisibleStrategies] = useState([]);
   const [category, setCategory] = useState("all"); // all | micro | mini
+  const [marketSort, setMarketSort] = useState("pnl");
+  const [strategySort, setStrategySort] = useState("pnl");
 
   const hasMicro = Object.values(settings).some((m) => (m.category || "micro") === "micro");
   const hasMini = Object.values(settings).some((m) => m.category === "mini");
@@ -1225,22 +1195,35 @@ function PortfolioView({ settings, trades, strategies }) {
   const multiCurve = useMemo(() => buildMultiEquityCurve(scopedTrades, strategies), [scopedTrades, strategies]);
 
   const byMarket = useMemo(() => {
-    return Object.keys(settings)
+    const list = Object.keys(settings)
       .filter((m) => category === "all" || (settings[m].category || "micro") === category)
       .map((m) => {
         const marketTrades = scopedTrades.filter((t) => t.market === m);
         return { key: m, ...settings[m], stats: calcStats(marketTrades) };
       });
-  }, [settings, scopedTrades, category]);
+    return sortGroups(list, marketSort);
+  }, [settings, scopedTrades, category, marketSort]);
 
   const byStrategy = useMemo(() => {
     const names = Array.from(new Set(scopedTrades.map((t) => t.strategy).filter(Boolean)));
-    return names
-      .map((s) => ({ key: s, stats: calcStats(scopedTrades.filter((t) => t.strategy === s)) }))
-      .sort((a, b) => b.stats.totalPnl - a.stats.totalPnl);
-  }, [scopedTrades]);
+    const list = names
+      .map((s) => ({ key: s, stats: calcStats(scopedTrades.filter((t) => t.strategy === s)), curve: equityCurve(scopedTrades.filter((t) => t.strategy === s)) }));
+    return sortGroups(list, strategySort);
+  }, [scopedTrades, strategySort]);
 
-  const barData = byMarket.map((m) => ({ name: m.key, pnl: m.stats.totalPnl, fill: m.accent }));
+  const acctRollup = useMemo(() => {
+    if (accounts.length === 0) return null;
+    let currentTotal = 0, breachedCount = 0;
+    accounts.forEach((a) => {
+      const timelineData = buildAccountBalanceTimeline(a, trades);
+      const { floor } = computeAccountFloor(a, timelineData);
+      currentTotal += timelineData.currentBalance;
+      const hasFloor = (Number(a.drawdownAmount) || 0) > 0 || (a.minimum || 0) > 0;
+      if (hasFloor && timelineData.currentBalance < floor) breachedCount += 1;
+    });
+    return { currentTotal, breachedCount };
+  }, [accounts, trades]);
+
   const colorFor = (s) => ACCENT_PALETTE[strategies.indexOf(s) % ACCENT_PALETTE.length];
   const toggleStrategy = (s) => setVisibleStrategies((v) => v.includes(s) ? v.filter((x) => x !== s) : [...v, s]);
 
@@ -1255,7 +1238,9 @@ function PortfolioView({ settings, trades, strategies }) {
           </div>
         </div>
       )}
+
       <StatGrid stats={stats} />
+
       <div className="fj-panel">
         <p className="fj-panel-title">Equity curve</p>
         {strategies.length > 0 && (
@@ -1282,108 +1267,85 @@ function PortfolioView({ settings, trades, strategies }) {
         )}
         <PortfolioEquityChart data={multiCurve} strategies={strategies} visible={visibleStrategies} colorFor={colorFor} />
       </div>
-      <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr", gap: 14 }}>
-        <div className="fj-panel">
-          <p className="fj-panel-title">P&amp;L by market</p>
-          {byMarket.length === 0 || byMarket.every((m) => m.stats.n === 0) ? (
-            <div className="fj-empty">No trades yet.</div>
-          ) : (
-            <ResponsiveContainer width="100%" height={180}>
-              <BarChart data={barData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
-                <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
-                <XAxis dataKey="name" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-                <YAxis stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-                <ReferenceLine y={0} stroke="#3A4150" />
-                <Tooltip
-                  contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
-                  labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
-                  itemStyle={{ color: "#E7E5E0" }}
-                  cursor={{ fill: "rgba(139,146,158,0.08)" }}
-                  formatter={(v) => [money(v), "P&L"]}
-                />
-                <Bar dataKey="pnl" radius={[4, 4, 0, 0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          )}
-        </div>
-        <div className="fj-panel">
-          <p className="fj-panel-title">Top strategies</p>
-          {byStrategy.length === 0 ? (
-            <div className="fj-empty">No strategies logged yet.</div>
-          ) : (
-            <table className="fj-table">
-              <thead><tr><th>Strategy</th><th>P&amp;L</th><th>Win %</th><th>Trades</th></tr></thead>
-              <tbody>
-                {byStrategy.slice(0, 6).map((s) => (
-                  <tr key={s.key}>
-                    <td style={{ fontFamily: "Inter, sans-serif" }}>{s.key}</td>
-                    <td className={s.stats.totalPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(s.stats.totalPnl)}</td>
-                    <td>{pct(s.stats.winRate)}</td>
-                    <td>{s.stats.n}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
 
-// ---------- group cards (strategy / market) ----------
-
-function GroupCards({ groups, emptyLabel }) {
-  const [expanded, setExpanded] = useState(null);
-  if (groups.length === 0) return <div className="fj-empty">{emptyLabel}</div>;
-  return (
-    <div className="fj-cards-grid">
-      {groups.map((g) => {
-        const isOpen = expanded === g.key;
-        const isProfit = g.stats.totalPnl >= 0;
-        const hasTrades = g.stats.n > 0;
-        return (
-          <div key={g.key} className="fj-strat-card">
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-              <div className="fj-strat-name">{g.key}</div>
-              <button className="fj-iconbtn" onClick={() => setExpanded(isOpen ? null : g.key)} title="More stats">
-                {isOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-              </button>
-            </div>
-            <div className="fj-strat-row"><span>Total P&amp;L</span><b className={isProfit ? "fj-profit" : "fj-loss"}>{hasTrades ? money(g.stats.totalPnl) : "—"}</b></div>
-            <div className="fj-strat-row"><span>Trades</span><b>{g.stats.n}</b></div>
-            <div className="fj-strat-row"><span>Win rate</span><b>{hasTrades ? pct(g.stats.winRate) : "—"}</b></div>
-            <div className="fj-strat-row"><span>Profit factor</span><b>{g.stats.profitFactor === null ? "—" : g.stats.profitFactor === Infinity ? "∞" : g.stats.profitFactor.toFixed(2)}</b></div>
-            <div className="fj-strat-row"><span>Expectancy</span><b className={g.stats.expectancy >= 0 ? "fj-profit" : "fj-loss"}>{hasTrades ? money(g.stats.expectancy) : "—"}</b></div>
-            <div className="fj-strat-row"><span>Max drawdown</span><b className="fj-loss">{hasTrades ? money(-g.stats.maxDD) : "—"}</b></div>
-
-            {isOpen && (
-              <div style={{ marginTop: 10 }}>
-                <div className="fj-strat-row"><span>Avg win</span><b className="fj-profit">{money(g.stats.avgWin)}</b></div>
-                <div className="fj-strat-row"><span>Avg loss</span><b className="fj-loss">{money(-g.stats.avgLoss)}</b></div>
-                <div className="fj-strat-row"><span>Largest win</span><b className="fj-profit">{money(g.stats.largestWin)}</b></div>
-                <div className="fj-strat-row"><span>Largest loss</span><b className="fj-loss">{money(g.stats.largestLoss)}</b></div>
-                <div className="fj-strat-row"><span>Longest win streak</span><b className="fj-profit">{g.stats.maxWinStreak} trade{g.stats.maxWinStreak === 1 ? "" : "s"}</b></div>
-                <div className="fj-strat-row"><span>Longest loss streak</span><b className="fj-loss">{g.stats.maxLossStreak} trade{g.stats.maxLossStreak === 1 ? "" : "s"}</b></div>
-              </div>
-            )}
-
-            {hasTrades ? (
-              <>
-                <div style={{ marginTop: 12 }}>
-                  <EquityChart curve={g.curve} color={g.accent || "#D9A441"} />
-                </div>
-                <div style={{ marginTop: 10 }}>
-                  <div className="fj-stat-label" style={{ marginBottom: 6 }}>Daily &amp; weekly P&amp;L</div>
-                  <CalendarHeatmap trades={g.trades} />
-                </div>
-              </>
-            ) : (
-              <div className="fj-empty" style={{ padding: "16px 0" }}>No trades yet.</div>
-            )}
+      {acctRollup && (
+        <div className="fj-panel" style={{ cursor: "pointer" }} onClick={onViewAccounts}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <p className="fj-panel-title" style={{ margin: 0 }}>Accounts</p>
+            <span className="fj-sub">{accounts.length} account{accounts.length === 1 ? "" : "s"} · view all →</span>
           </div>
-        );
-      })}
+          <div className="fj-stat-grid" style={{ marginTop: 12, marginBottom: 0 }}>
+            <div className="fj-stat-card">
+              <div className="fj-stat-label">Total current balance</div>
+              <div className="fj-stat-value">{money(acctRollup.currentTotal)}</div>
+            </div>
+            <div className="fj-stat-card">
+              <div className="fj-stat-label">Below floor</div>
+              <div className={`fj-stat-value ${acctRollup.breachedCount > 0 ? "fj-loss" : "fj-profit"}`}>{acctRollup.breachedCount}</div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginTop: 22, marginBottom: 10 }}>
+        <div className="fj-section-label" style={{ margin: 0 }}>Markets — click to break down</div>
+        <SortToggle value={marketSort} onChange={setMarketSort} />
+      </div>
+      <div className="fj-ticker" style={{ marginBottom: 22 }}>
+        {byMarket.map((m) => {
+          const isProfit = m.stats.totalPnl >= 0;
+          return (
+            <div
+              key={m.key}
+              className="fj-ticker-card"
+              style={{ "--dot": m.accent }}
+              onClick={() => onSelect("market", m.key)}
+            >
+              <div className="fj-ticker-top">
+                <span className="fj-ticker-sym"><span className="fj-dot" style={{ background: m.accent }} />{m.key}</span>
+                {m.stats.n > 0 && (isProfit ? <TrendingUp size={14} color="#5FA37A" /> : <TrendingDown size={14} color="#C2634A" />)}
+              </div>
+              <div className={`fj-ticker-pnl ${m.stats.n === 0 ? "fj-neutral" : isProfit ? "fj-profit" : "fj-loss"}`}>
+                {m.stats.n === 0 ? "—" : money(m.stats.totalPnl)}
+              </div>
+              <div className="fj-ticker-meta">{m.stats.n} trade{m.stats.n === 1 ? "" : "s"} · {m.stats.n ? pct(m.stats.winRate) + " win" : "no data"}</div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginTop: 22, marginBottom: 10 }}>
+        <div className="fj-section-label" style={{ margin: 0 }}>Strategies — click to break down</div>
+        <SortToggle value={strategySort} onChange={setStrategySort} />
+      </div>
+      {byStrategy.length === 0 ? (
+        <div className="fj-empty">No strategies logged yet.</div>
+      ) : (
+        <div className="fj-cards-grid">
+          {byStrategy.map((s) => {
+            const isProfit = s.stats.totalPnl >= 0;
+            return (
+              <div key={s.key} className="fj-strat-card fj-strat-card-clickable" onClick={() => onSelect("strategy", s.key)}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+                  <div className="fj-strat-name">{s.key}</div>
+                  {isProfit ? <TrendingUp size={14} color="#5FA37A" /> : <TrendingDown size={14} color="#C2634A" />}
+                </div>
+                <div className={`fj-strat-pnl-big ${isProfit ? "fj-profit" : "fj-loss"}`}>{money(s.stats.totalPnl)}</div>
+                <div className="fj-strat-meta-row">
+                  <span>{pct(s.stats.winRate)} win</span>
+                  <span>{s.stats.n} trades</span>
+                  <span>PF {s.stats.profitFactor === null ? "—" : s.stats.profitFactor === Infinity ? "∞" : s.stats.profitFactor.toFixed(2)}</span>
+                </div>
+                <ResponsiveContainer width="100%" height={40}>
+                  <LineChart data={s.curve} margin={{ top: 6, right: 0, left: 0, bottom: 0 }}>
+                    <Line type="monotone" dataKey="equity" stroke={colorFor(s.key)} strokeWidth={1.75} dot={false} isAnimationActive={false} />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
@@ -1801,19 +1763,15 @@ function TradeLog({ trades, onEdit, onDelete }) {
 
 // ---------- calendar view ----------
 
-function CalendarView({ trades, filterMarkets, strategies }) {
+function CalendarView({ trades, strategies }) {
   const today = new Date();
   const [cursor, setCursor] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [selectedStrategy, setSelectedStrategy] = useState("ALL");
   const [mode, setMode] = useState("month"); // "month" | "year"
 
-  const marketFiltered = useMemo(
-    () => trades.filter((t) => filterMarkets.length === 0 || filterMarkets.includes(t.market)),
-    [trades, filterMarkets]
-  );
   const scoped = useMemo(
-    () => selectedStrategy === "ALL" ? marketFiltered : marketFiltered.filter((t) => t.strategy === selectedStrategy),
-    [marketFiltered, selectedStrategy]
+    () => selectedStrategy === "ALL" ? trades : trades.filter((t) => t.strategy === selectedStrategy),
+    [trades, selectedStrategy]
   );
 
   const byDate = useMemo(() => {
@@ -1990,46 +1948,202 @@ function CalendarView({ trades, filterMarkets, strategies }) {
 
 // ---------- heatmaps ----------
 
-function HeatmapsView({ trades, settings, strategies }) {
-  if (trades.length === 0) {
-    return <div className="fj-empty">No trades match the current filters — log a few trades to see the heatmaps.</div>;
-  }
+// ---------- advanced stats ----------
+
+const WINDOW_OPTIONS = [
+  ["15", "15 min"],
+  ["30", "30 min"],
+  ["60", "1 hour"],
+  ["dow", "Day of week"],
+  ["date", "Calendar day"],
+];
+const TRADING_DOW_ORDER = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+
+function WindowStatsPanel({ trades }) {
+  const [windowMode, setWindowMode] = useState("15");
+
+  const isTimeWindow = windowMode === "15" || windowMode === "30" || windowMode === "60";
+  const timelessCount = isTimeWindow ? trades.filter((t) => !t.time).length : 0;
+
+  const buckets = useMemo(() => {
+    if (windowMode === "dow") {
+      const map = {};
+      trades.forEach((t) => {
+        const label = DOW_LABELS_FULL[dowOf(t.date)];
+        map[label] = map[label] || [];
+        map[label].push(t);
+      });
+      return TRADING_DOW_ORDER.filter((l) => map[l]).map((l) => ({ key: l, label: l, trades: map[l] }));
+    }
+    if (windowMode === "date") {
+      const map = {};
+      trades.forEach((t) => { map[t.date] = map[t.date] || []; map[t.date].push(t); });
+      return Object.keys(map).sort().map((d) => ({ key: d, label: d, trades: map[d] }));
+    }
+    const windowMinutes = Number(windowMode);
+    const map = {};
+    trades.filter((t) => t.time).forEach((t) => {
+      const [h, m] = t.time.split(":").map(Number);
+      if (Number.isNaN(h) || Number.isNaN(m)) return;
+      const totalMin = h * 60 + m;
+      const bucketStart = Math.floor(totalMin / windowMinutes) * windowMinutes;
+      map[bucketStart] = map[bucketStart] || [];
+      map[bucketStart].push(t);
+    });
+    const fmt = (mins) => `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
+    return Object.keys(map).map(Number).sort((a, b) => a - b)
+      .map((start) => ({ key: start, label: `${fmt(start)}–${fmt(start + windowMinutes)}`, trades: map[start] }));
+  }, [trades, windowMode]);
+
+  const rows = buckets.map((b) => ({ ...b, stats: calcStats(b.trades) }));
+  const barData = rows.map((r) => ({ name: r.label, pnl: r.stats.totalPnl }));
+
   return (
     <div>
-      <div className="fj-panel">
-        <p className="fj-panel-title">Every trade, plotted</p>
-        <div className="fj-sub" style={{ marginBottom: 12 }}>
-          Each dot is one trade — P&amp;L on the Y axis, spread horizontally only so overlapping trades stay visible. Good for spotting outliers, clustering, and whether size or timing is driving results.
+      <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
+        <span className="fj-sub" style={{ marginRight: 2 }}>Window:</span>
+        <div className="fj-seg-toggle">
+          {WINDOW_OPTIONS.map(([key, label]) => (
+            <button key={key} className={`fj-seg-btn ${windowMode === key ? "active" : ""}`} onClick={() => setWindowMode(key)}>
+              {label}
+            </button>
+          ))}
         </div>
-        <TradeScatterChart trades={trades} settings={settings} strategies={strategies} />
       </div>
+      {isTimeWindow && timelessCount > 0 && (
+        <div className="fj-sub" style={{ marginBottom: 10 }}>
+          {timelessCount} trade{timelessCount === 1 ? "" : "s"} without a logged time excluded from this window.
+        </div>
+      )}
 
-      <div className="fj-panel">
-        <p className="fj-panel-title">Trade sequence by market</p>
-        <div className="fj-sub" style={{ marginBottom: 12 }}>
-          Each square is one trade, in chronological order. Color intensity scales with P&amp;L size relative to the biggest trade in view — hover a square for details.
-        </div>
-        <TradeSequenceHeatmap trades={trades} settings={settings} />
-      </div>
+      {rows.length === 0 ? (
+        <div className="fj-empty">No trades in this scope{isTimeWindow ? " — trades need a logged time to appear in 15/30/60-min windows." : "."}</div>
+      ) : (
+        <>
+          <ResponsiveContainer width="100%" height={190}>
+            <BarChart data={barData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
+              <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
+              <XAxis dataKey="name" stroke="#8B929E" tick={{ fontSize: 10.5, fontFamily: "JetBrains Mono" }} interval={0} angle={rows.length > 8 ? -40 : 0} textAnchor={rows.length > 8 ? "end" : "middle"} height={rows.length > 8 ? 55 : 30} />
+              <YAxis stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+              <ReferenceLine y={0} stroke="#3A4150" />
+              <Tooltip
+                contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+                labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
+                itemStyle={{ color: "#E7E5E0" }}
+                cursor={{ fill: "rgba(139,146,158,0.08)" }}
+                formatter={(v) => [money(v), "P&L"]}
+              />
+              <Bar dataKey="pnl" radius={[4, 4, 0, 0]}>
+                {barData.map((d, i) => <Cell key={i} fill={d.pnl >= 0 ? "#5FA37A" : "#C2634A"} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
 
-      <div className="fj-panel">
-        <p className="fj-panel-title">Day of week × hour of day</p>
-        <div className="fj-sub" style={{ marginBottom: 12 }}>
-          Total P&amp;L for trades entered at each hour/day combination. Requires a trade time — trades logged without one are excluded from this view.
-        </div>
-        <DowHourHeatmap trades={trades} />
-      </div>
-
-      <div className="fj-panel">
-        <p className="fj-panel-title">Daily P&amp;L calendar</p>
-        <div className="fj-sub" style={{ marginBottom: 12 }}>
-          One square per calendar day. Darker means a bigger day, green for net winning days, red for net losing days.
-        </div>
-        <CalendarHeatmap trades={trades} />
-      </div>
+          <div style={{ overflowX: "auto", marginTop: 12 }}>
+            <table className="fj-table">
+              <thead>
+                <tr>
+                  <th>Window</th><th>Trades</th><th>Win %</th><th>P&amp;L</th><th>Avg P&amp;L</th><th>Profit Factor</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r) => (
+                  <tr key={r.key}>
+                    <td>{r.label}</td>
+                    <td>{r.stats.n}</td>
+                    <td>{pct(r.stats.winRate)}</td>
+                    <td className={r.stats.totalPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(r.stats.totalPnl)}</td>
+                    <td className={r.stats.expectancy >= 0 ? "fj-profit" : "fj-loss"}>{money(r.stats.expectancy)}</td>
+                    <td>{r.stats.profitFactor === null ? "—" : r.stats.profitFactor === Infinity ? "∞" : r.stats.profitFactor.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </>
+      )}
     </div>
   );
 }
+
+// ---------- detail view (strategy or market drill-down) ----------
+
+function DetailView({ selected, trades, settings, strategies, onBack, onNavigate, onEdit, onDelete }) {
+  const isStrategy = selected.type === "strategy";
+  const list = isStrategy ? strategies : Object.keys(settings);
+  const idx = list.indexOf(selected.key);
+
+  const entityTrades = useMemo(
+    () => trades.filter((t) => isStrategy ? t.strategy === selected.key : t.market === selected.key),
+    [trades, isStrategy, selected.key]
+  );
+  const stats = useMemo(() => calcStats(entityTrades), [entityTrades]);
+  const curve = useMemo(() => equityCurve(entityTrades), [entityTrades]);
+  const accent = isStrategy ? ACCENT_PALETTE[idx >= 0 ? idx % ACCENT_PALETTE.length : 0] : (settings[selected.key]?.accent || "#D9A441");
+
+  const goPrev = () => { if (list.length === 0) return; onNavigate(selected.type, list[(idx - 1 + list.length) % list.length]); };
+  const goNext = () => { if (list.length === 0) return; onNavigate(selected.type, list[(idx + 1) % list.length]); };
+
+  return (
+    <div>
+      <button className="fj-back-btn" onClick={onBack}><ArrowLeft size={15} /> Back to dashboard</button>
+
+      <div className="fj-detail-head">
+        <div>
+          <div className="fj-sub" style={{ textTransform: "uppercase", letterSpacing: 0.5, fontSize: 11 }}>{isStrategy ? "Strategy" : "Market"}</div>
+          <div className="fj-detail-title">{selected.key}{!isStrategy && settings[selected.key] && ` — ${settings[selected.key].label}`}</div>
+          <div className="fj-sub" style={{ marginTop: 3 }}>{stats.n} trade{stats.n === 1 ? "" : "s"}</div>
+        </div>
+        {list.length > 1 && (
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="fj-iconbtn" style={{ border: "1px solid var(--border)", borderRadius: 7 }} onClick={goPrev}><ChevronLeft size={16} /></button>
+            <button className="fj-iconbtn" style={{ border: "1px solid var(--border)", borderRadius: 7 }} onClick={goNext}><ChevronRight size={16} /></button>
+          </div>
+        )}
+      </div>
+
+      <StatGrid stats={stats} />
+
+      {stats.n === 0 ? (
+        <div className="fj-empty">No trades logged for this {isStrategy ? "strategy" : "market"} yet.</div>
+      ) : (
+        <>
+          <div className="fj-panel">
+            <p className="fj-panel-title">Equity curve</p>
+            <EquityChart curve={curve} color={accent} />
+          </div>
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+            <div className="fj-panel">
+              <p className="fj-panel-title">Daily &amp; weekly P&amp;L</p>
+              <CalendarHeatmap trades={entityTrades} />
+            </div>
+            <div className="fj-panel">
+              <p className="fj-panel-title">Day of week × hour of day</p>
+              <DowHourHeatmap trades={entityTrades} />
+            </div>
+          </div>
+
+          <div className="fj-panel">
+            <p className="fj-panel-title">Stats by time window</p>
+            <WindowStatsPanel trades={entityTrades} />
+          </div>
+
+          <div className="fj-panel">
+            <p className="fj-panel-title">Every trade, plotted</p>
+            <TradeScatterChart trades={entityTrades} settings={settings} strategies={strategies} />
+          </div>
+
+          <div className="fj-panel">
+            <p className="fj-panel-title">Trade log</p>
+            <TradeLog trades={entityTrades} onEdit={onEdit} onDelete={onDelete} />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 
 function TradeScatterChart({ trades, settings, strategies }) {
   const [colorMode, setColorMode] = useState("outcome"); // outcome | market | strategy
@@ -2159,48 +2273,6 @@ function TradeScatterChart({ trades, settings, strategies }) {
   );
 }
 
-function TradeSequenceHeatmap({ trades, settings }) {
-  const rows = Object.keys(settings).map((m) => {
-    const marketTrades = trades
-      .filter((t) => t.market === m)
-      .sort((a, b) => new Date(`${a.date}T${a.time || "00:00"}`) - new Date(`${b.date}T${b.time || "00:00"}`));
-    const marketMaxAbs = Math.max(1, ...marketTrades.map((t) => Math.abs(t.pnl)));
-    return { market: m, accent: settings[m].accent, trades: marketTrades, maxAbs: marketMaxAbs };
-  }).filter((r) => r.trades.length > 0);
-
-  if (rows.length === 0) return <div className="fj-empty">No trades yet.</div>;
-
-  return (
-    <div style={{ overflowX: "auto" }}>
-      <div className="fj-sub" style={{ marginBottom: 10 }}>
-        Each market's color scale is normalized to its own biggest trade — a market with smaller typical size won't look duller just because another market trades bigger.
-      </div>
-      {rows.map((r) => (
-        <div key={r.market} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-          <div style={{ width: 46, flexShrink: 0, fontFamily: "Space Grotesk, sans-serif", fontWeight: 700, fontSize: 12.5, display: "flex", alignItems: "center", gap: 5 }}>
-            <span className="fj-dot" style={{ background: r.accent, display: "inline-block", width: 7, height: 7, borderRadius: "50%" }} />
-            {r.market}
-          </div>
-          <div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
-            {r.trades.map((t) => (
-              <div
-                key={t.id}
-                title={`${t.date}${t.time ? " " + t.time : ""} · ${t.strategy || "no strategy"} · ${money(t.pnl)}`}
-                style={{
-                  width: 15, height: 15, borderRadius: 3,
-                  background: heatColor(t.pnl, r.maxAbs),
-                  border: "1px solid #2B303A",
-                  cursor: "default",
-                }}
-              />
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
-
 function DowHourHeatmap({ trades }) {
   const timed = trades.filter((t) => t.time);
   if (timed.length === 0) {
@@ -2324,7 +2396,7 @@ function TradeForm({ initial, strategies, accounts, settings, onCancel, onSave }
   const [entry, setEntry] = useState(initial?.entry ?? "");
   const [exit, setExit] = useState(initial?.exit ?? "");
   const [fees, setFees] = useState(initial?.fees ?? 0);
-  const [pnl, setPnl] = useState(initial?.pnl ?? "");
+  const [grossPnl, setGrossPnl] = useState(initial ? Number((initial.pnl + (initial.fees || 0)).toFixed(2)) : "");
   const [notes, setNotes] = useState(initial?.notes || "");
   const [tradeAccounts, setTradeAccounts] = useState(initial?.accounts || []);
 
@@ -2335,22 +2407,23 @@ function TradeForm({ initial, strategies, accounts, settings, onCancel, onSave }
   const calcFromPrices = () => {
     const mult = Number(settings[market]?.multiplier) || 1;
     const dir = direction === "Short" ? -1 : 1;
-    const raw = (Number(exit) - Number(entry)) * mult * (Number(contracts) || 1) * dir - (Number(fees) || 0);
-    setPnl(Number.isFinite(raw) ? raw.toFixed(2) : "");
+    const raw = (Number(exit) - Number(entry)) * mult * (Number(contracts) || 1) * dir;
+    setGrossPnl(Number.isFinite(raw) ? raw.toFixed(2) : "");
   };
 
   const canCalc = entry !== "" && exit !== "" && contracts !== "";
+  const netPnl = grossPnl === "" || isNaN(Number(grossPnl)) ? null : Number(grossPnl) - (Number(fees) || 0);
 
   const submit = (e) => {
     e.preventDefault();
-    if (pnl === "" || isNaN(Number(pnl))) return;
+    if (grossPnl === "" || isNaN(Number(grossPnl))) return;
     onSave({
       date, time, market, strategy: strategy.trim(), direction,
       contracts: Number(contracts) || 1,
       entry: entry === "" ? null : Number(entry),
       exit: exit === "" ? null : Number(exit),
       fees: Number(fees) || 0,
-      pnl: Number(pnl),
+      pnl: Number((Number(grossPnl) - (Number(fees) || 0)).toFixed(2)),
       notes: notes.trim(),
       accounts: tradeAccounts,
     });
@@ -2431,7 +2504,7 @@ function TradeForm({ initial, strategies, accounts, settings, onCancel, onSave }
               <input type="number" min="1" step="1" className="fj-input" value={contracts} onChange={(e) => setContracts(e.target.value)} />
             </div>
             <div className="fj-form-field">
-              <label>Fees (optional, $)</label>
+              <label>Fees (optional, $) — subtracted from Gross P&amp;L</label>
               <input type="number" step="0.01" className="fj-input" value={fees} onChange={(e) => setFees(e.target.value)} />
             </div>
           </div>
@@ -2453,10 +2526,16 @@ function TradeForm({ initial, strategies, accounts, settings, onCancel, onSave }
             </button>
           </div>
 
-          <div className="fj-form-field" style={{ marginBottom: 12 }}>
-            <label>P&amp;L ($) — always directly editable</label>
-            <input type="number" step="0.01" className="fj-input" value={pnl} onChange={(e) => setPnl(e.target.value)} required placeholder="e.g. 62.50 or -37.50" />
+          <div className="fj-form-field" style={{ marginBottom: 6 }}>
+            <label>Gross P&amp;L ($, before fees) — always directly editable</label>
+            <input type="number" step="0.01" className="fj-input" value={grossPnl} onChange={(e) => setGrossPnl(e.target.value)} required placeholder="e.g. 62.50 or -37.50" />
           </div>
+          {netPnl !== null && Number(fees) !== 0 && (
+            <div className="fj-sub" style={{ marginBottom: 12 }}>
+              Net P&amp;L after {money(Number(fees) || 0)} in fees: <b style={{ color: netPnl >= 0 ? "var(--profit)" : "var(--loss)", fontFamily: "JetBrains Mono, monospace" }}>{money(netPnl)}</b> — this is what's saved and used everywhere.
+            </div>
+          )}
+          {(netPnl === null || Number(fees) === 0) && <div style={{ marginBottom: 12 }} />}
 
           <div className="fj-form-field" style={{ marginBottom: 16 }}>
             <label>Notes (optional)</label>
