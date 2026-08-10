@@ -216,12 +216,38 @@ function buildAccountBalanceTimeline(account, trades) {
   const priorDayBalance = timeline.length >= 2 ? timeline[timeline.length - 2].balance : account.startingBalance;
   const peakBalance = Math.max(account.startingBalance, ...timeline.map((t) => t.balance));
   const totalPaidOut = (account.payouts || []).reduce((s, p) => s + p.amount, 0);
-  const currentBalance = Number((rawCurrentBalance - totalPaidOut).toFixed(2));
+  const totalAdjustments = (account.adjustments || []).reduce((s, a) => s + a.amount, 0);
+  const currentBalance = Number((rawCurrentBalance - totalPaidOut + totalAdjustments).toFixed(2));
 
   return {
-    timeline, currentBalance, priorDayBalance, peakBalance, totalPaidOut,
+    timeline, currentBalance, priorDayBalance, peakBalance, totalPaidOut, totalAdjustments,
     tradingPnl: taggedTrades.reduce((s, t) => s + t.pnl, 0),
   };
+}
+
+// Builds the true balance-over-time curve for charting — merges trading
+// P&L, payouts, and manual adjustments chronologically, one point per
+// event (per trade, not per day) — same granularity as the strategy
+// sparklines, so the line actually shows each trade's movement instead of
+// smoothing a day's trades into a single net point. This is separate from
+// buildAccountBalanceTimeline's trading-only timeline, which is kept
+// isolated deliberately so the trailing-drawdown floor calc isn't affected
+// by withdrawals or corrections.
+function buildAccountEquityCurve(account, trades) {
+  const taggedTrades = trades.filter((t) => (t.accounts || []).includes(account.name));
+  const events = [
+    ...taggedTrades.map((t) => ({ date: t.date, time: t.time || "00:00", amount: t.pnl })),
+    ...(account.payouts || []).map((p) => ({ date: p.date, time: "00:00", amount: -p.amount })),
+    ...(account.adjustments || []).map((a) => ({ date: a.date, time: "00:00", amount: a.amount })),
+  ].sort((a, b) => new Date(`${a.date}T${a.time}`) - new Date(`${b.date}T${b.time}`));
+
+  let running = account.startingBalance;
+  const points = [{ i: 0, date: events[0]?.date || null, balance: Number(running.toFixed(2)) }];
+  events.forEach((e, idx) => {
+    running += e.amount;
+    points.push({ i: idx + 1, date: e.date, balance: Number(running.toFixed(2)) });
+  });
+  return points;
 }
 
 function computeAccountFloor(account, timelineData) {
@@ -754,7 +780,7 @@ export default function TradingJournal() {
         <CalendarView trades={trades} strategies={strategies} />
       )}
       {view === "accounts" && (
-        <AccountsView accounts={accounts} setAccounts={setAccounts} trades={trades} />
+        <AccountsView accounts={accounts} setAccounts={setAccounts} trades={trades} setTrades={setTrades} />
       )}
       {view === "log" && (
         <TradeLogView trades={trades} strategies={strategies} accounts={accounts} settings={settings} onEdit={startEdit} onDelete={handleDelete} />
@@ -1338,6 +1364,7 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
                 </div>
                 <ResponsiveContainer width="100%" height={40}>
                   <LineChart data={s.curve} margin={{ top: 6, right: 0, left: 0, bottom: 0 }}>
+                    <YAxis hide domain={["dataMin", "dataMax"]} />
                     <Line type="monotone" dataKey="equity" stroke={colorFor(s.key)} strokeWidth={1.75} dot={false} isAnimationActive={false} />
                   </LineChart>
                 </ResponsiveContainer>
@@ -1352,7 +1379,7 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
 
 // ---------- accounts ----------
 
-function AccountsView({ accounts, setAccounts, trades }) {
+function AccountsView({ accounts, setAccounts, trades, setTrades }) {
   const [showAdd, setShowAdd] = useState(false);
   const [preset, setPreset] = useState("custom");
   const [newName, setNewName] = useState("");
@@ -1396,6 +1423,7 @@ function AccountsView({ accounts, setAccounts, trades }) {
       trailingLock: newTrailingLock,
       status: newIsCash ? "" : newStatus,
       payouts: [],
+      adjustments: [],
     };
     setAccounts((prev) => [...prev, account]);
     setNewName(""); setNewStarting(""); setNewMinimum(""); setNewDrawdownAmount(""); setNewProfitTarget("");
@@ -1406,7 +1434,15 @@ function AccountsView({ accounts, setAccounts, trades }) {
   const removeAccount = (id) => setAccounts((prev) => prev.filter((a) => a.id !== id));
 
   const updateAccount = (id, patch) => {
+    const current = accounts.find((a) => a.id === id);
     setAccounts((prev) => prev.map((a) => a.id === id ? { ...a, ...patch } : a));
+    if (current && patch.name && patch.name !== current.name) {
+      setTrades((prevTrades) => prevTrades.map((t) =>
+        (t.accounts || []).includes(current.name)
+          ? { ...t, accounts: t.accounts.map((n) => n === current.name ? patch.name : n) }
+          : t
+      ));
+    }
   };
 
   const addPayout = (id, date, amount) => {
@@ -1419,6 +1455,18 @@ function AccountsView({ accounts, setAccounts, trades }) {
 
   const removePayout = (accountId, entryId) => {
     setAccounts((prev) => prev.map((a) => a.id === accountId ? { ...a, payouts: (a.payouts || []).filter((p) => p.id !== entryId) } : a));
+  };
+
+  const addAdjustment = (id, date, amount, note) => {
+    setAccounts((prev) => prev.map((a) => {
+      if (a.id !== id) return a;
+      const adjustments = [...(a.adjustments || []), { id: uid(), date, amount, note }].sort((x, y) => x.date.localeCompare(y.date));
+      return { ...a, adjustments };
+    }));
+  };
+
+  const removeAdjustment = (accountId, entryId) => {
+    setAccounts((prev) => prev.map((a) => a.id === accountId ? { ...a, adjustments: (a.adjustments || []).filter((adj) => adj.id !== entryId) } : a));
   };
 
   const rollup = useMemo(() => {
@@ -1555,10 +1603,17 @@ function AccountsView({ accounts, setAccounts, trades }) {
             </>
           )}
 
-          <div className="fj-form-field" style={{ marginBottom: 12 }}>
-            <label>Flat minimum balance ($, optional — only if this isn't a trailing/EOD account)</label>
-            <input type="number" step="0.01" className="fj-input" placeholder="e.g. a personal risk floor for a cash account" value={newMinimum} onChange={(e) => setNewMinimum(e.target.value)} />
-          </div>
+          {(newIsCash || !newDrawdownAmount) && (
+            <div className="fj-form-field" style={{ marginBottom: 12 }}>
+              <label>Flat minimum balance ($, optional)</label>
+              <input type="number" step="0.01" className="fj-input" placeholder="e.g. a personal risk floor for a cash account" value={newMinimum} onChange={(e) => setNewMinimum(e.target.value)} />
+            </div>
+          )}
+          {!newIsCash && !!newDrawdownAmount && (
+            <div className="fj-sub" style={{ marginBottom: 12 }}>
+              Flat minimum is hidden because Max drawdown is set above — the drawdown floor takes over once that's filled in, so a flat minimum wouldn't have any effect.
+            </div>
+          )}
 
           {error && <div className="fj-loss" style={{ fontSize: 12, marginBottom: 8 }}>{error}</div>}
           <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
@@ -1581,6 +1636,8 @@ function AccountsView({ accounts, setAccounts, trades }) {
               onUpdate={(patch) => updateAccount(a.id, patch)}
               onAddPayout={(date, amount) => addPayout(a.id, date, amount)}
               onRemovePayout={(entryId) => removePayout(a.id, entryId)}
+              onAddAdjustment={(date, amount, note) => addAdjustment(a.id, date, amount, note)}
+              onRemoveAdjustment={(entryId) => removeAdjustment(a.id, entryId)}
             />
           ))}
         </div>
@@ -1608,18 +1665,24 @@ function AccountBar({ min, current, max, currentLabel, minLabel, maxLabel }) {
   );
 }
 
-function AccountCard({ account, trades, onRemove, onUpdate, onAddPayout, onRemovePayout }) {
+function AccountCard({ account, trades, onRemove, onUpdate, onAddPayout, onRemovePayout, onAddAdjustment, onRemoveAdjustment }) {
   const [payoutDate, setPayoutDate] = useState(new Date().toISOString().slice(0, 10));
   const [payoutAmount, setPayoutAmount] = useState("");
+  const [adjDate, setAdjDate] = useState(new Date().toISOString().slice(0, 10));
+  const [adjAmount, setAdjAmount] = useState("");
+  const [adjNote, setAdjNote] = useState("");
+  const [editingDetails, setEditingDetails] = useState(false);
+  const [showAdjustments, setShowAdjustments] = useState(false);
 
   const timelineData = buildAccountBalanceTimeline(account, trades);
-  const { currentBalance, peakBalance, tradingPnl } = timelineData;
+  const { currentBalance, peakBalance, tradingPnl, totalAdjustments } = timelineData;
   const { floor, locked, mode } = computeAccountFloor(account, timelineData);
   const payouts = account.payouts || [];
   const totalPaidOut = payouts.reduce((s, p) => s + p.amount, 0);
   const distanceToFloor = currentBalance - floor;
   const profitTarget = Number(account.profitTarget) || 0;
   const isEvalWithTarget = account.status === "Evaluation" && profitTarget > 0;
+  const equityCurveData = useMemo(() => buildAccountEquityCurve(account, trades), [account, trades]);
 
   const taggedTrades = trades.filter((t) => (t.accounts || []).includes(account.name));
   const sortedTradeDates = Array.from(new Set(taggedTrades.map((t) => t.date))).sort();
@@ -1633,9 +1696,17 @@ function AccountCard({ account, trades, onRemove, onUpdate, onAddPayout, onRemov
     setPayoutAmount("");
   };
 
+  const submitAdjustment = (e) => {
+    e.preventDefault();
+    if (adjAmount === "" || isNaN(Number(adjAmount))) return;
+    onAddAdjustment(adjDate, Number(adjAmount), adjNote.trim());
+    setAdjAmount(""); setAdjNote("");
+  };
+
   const badgeClass = account.isCash ? "cash" : account.status === "Passed" ? "passed" : account.status === "Failed" ? "failed" : "eval";
   const badgeLabel = account.isCash ? "Cash Account" : account.status === "Passed" ? "Passed / Funded" : account.status;
   const hasFloor = (Number(account.drawdownAmount) || 0) > 0 || (account.minimum || 0) > 0;
+  const curveTrendUp = equityCurveData.length > 1 ? equityCurveData[equityCurveData.length - 1].balance >= equityCurveData[0].balance : true;
 
   return (
     <div className="fj-acct-card">
@@ -1655,69 +1726,219 @@ function AccountCard({ account, trades, onRemove, onUpdate, onAddPayout, onRemov
               <option value="Failed">Failed</option>
             </select>
           )}
+          <button className="fj-iconbtn" onClick={() => setShowAdjustments((s) => !s)} title="Fix balance"><Settings2 size={13} /></button>
+          <button className="fj-iconbtn" onClick={() => setEditingDetails((s) => !s)} title="Edit account details"><Pencil size={13} /></button>
           <button className="fj-iconbtn" onClick={onRemove} title="Remove account"><Trash2 size={14} /></button>
         </div>
       </div>
 
-      {hasFloor && isEvalWithTarget && (
-        <AccountBar
-          min={floor} current={currentBalance} max={account.startingBalance + profitTarget}
-          minLabel="Floor" currentLabel="Current" maxLabel="Target to pass"
-        />
-      )}
-      {hasFloor && !isEvalWithTarget && (
-        <AccountBar
-          min={floor} current={currentBalance} max={Math.max(peakBalance, currentBalance, floor + (Number(account.drawdownAmount) || 1000))}
-          minLabel="Floor" currentLabel="Current" maxLabel="Peak"
-        />
+      {equityCurveData.length > 1 && (
+        <ResponsiveContainer width="100%" height={40}>
+          <LineChart data={equityCurveData} margin={{ top: 4, right: 0, left: 0, bottom: 0 }}>
+            <YAxis hide domain={["dataMin", "dataMax"]} />
+            <Line type="monotone" dataKey="balance" stroke={curveTrendUp ? "#5FA37A" : "#C2634A"} strokeWidth={1.75} dot={false} isAnimationActive={false} />
+          </LineChart>
+        </ResponsiveContainer>
       )}
 
-      <div className="fj-acct-row" style={{ marginTop: hasFloor ? 12 : 0 }}><span>Current balance</span><b>{money(currentBalance)}</b></div>
-      <div className="fj-acct-row"><span>Starting balance</span><b>{money(account.startingBalance)}</b></div>
-      {hasFloor && (
-        <div className="fj-acct-row">
-          <span>Drawdown floor {mode !== "static" && !locked ? "(trailing)" : mode !== "static" && locked ? "(locked)" : ""}</span>
-          <b>{money(floor)}</b>
-        </div>
-      )}
-      {isEvalWithTarget && (
-        <div className="fj-acct-row"><span>Profit target</span><b>{money(account.startingBalance + profitTarget)}</b></div>
-      )}
-      <div className="fj-acct-row"><span>Trading P&amp;L (tagged trades)</span><b className={tradingPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(tradingPnl)}</b></div>
-      <div className="fj-acct-row"><span>Total paid out</span><b>{money(totalPaidOut)}</b></div>
-      <div className="fj-acct-row"><span>Last trading day P&amp;L</span><b className={lastDayPnl === null ? "fj-neutral" : lastDayPnl >= 0 ? "fj-profit" : "fj-loss"}>{lastDayPnl === null ? "—" : money(lastDayPnl)}</b></div>
-      {hasFloor && (
-        <div className="fj-acct-row">
-          <span>Distance to floor</span>
-          <b className={distanceToFloor >= 0 ? "fj-profit" : "fj-loss"}>{money(distanceToFloor)}</b>
-        </div>
-      )}
-      <div className="fj-acct-row"><span>Trades tagged here</span><b>{taggedTrades.length}</b></div>
+      {editingDetails ? (
+        <AccountDetailsEditor account={account} onSave={(patch) => { onUpdate(patch); setEditingDetails(false); }} onCancel={() => setEditingDetails(false)} />
+      ) : (
+        <>
+          {hasFloor && isEvalWithTarget && (
+            <AccountBar
+              min={floor} current={currentBalance} max={account.startingBalance + profitTarget}
+              minLabel="Floor" currentLabel="Current" maxLabel="Target to pass"
+            />
+          )}
+          {hasFloor && !isEvalWithTarget && (
+            <AccountBar
+              min={floor} current={currentBalance} max={Math.max(peakBalance, currentBalance, floor + (Number(account.drawdownAmount) || 1000))}
+              minLabel="Floor" currentLabel="Current" maxLabel="Peak"
+            />
+          )}
 
-      <form onSubmit={submitPayout} className="fj-acct-updateform">
-        <div className="fj-form-field" style={{ flex: 1 }}>
-          <label>Payout date</label>
-          <input type="date" className="fj-input" value={payoutDate} onChange={(e) => setPayoutDate(e.target.value)} />
-        </div>
-        <div className="fj-form-field" style={{ flex: 1 }}>
-          <label>Amount paid out ($)</label>
-          <input type="number" step="0.01" className="fj-input" placeholder="1000" value={payoutAmount} onChange={(e) => setPayoutAmount(e.target.value)} />
-        </div>
-        <button type="submit" className="fj-btn primary" style={{ height: 37 }}>Log payout</button>
-      </form>
-
-      {(account.payouts || []).length > 0 && (
-        <div className="fj-acct-history">
-          {[...account.payouts].sort((a, b) => b.date.localeCompare(a.date)).map((p) => (
-            <div key={p.id} className="fj-acct-history-row">
-              <span>{p.date}</span>
-              <b>{money(p.amount)}</b>
-              <button className="fj-iconbtn" style={{ padding: 2 }} onClick={() => onRemovePayout(p.id)}><X size={12} /></button>
+          <div className="fj-acct-row" style={{ marginTop: hasFloor ? 12 : 8 }}><span>Current balance</span><b>{money(currentBalance)}</b></div>
+          <div className="fj-acct-row"><span>Starting balance</span><b>{money(account.startingBalance)}</b></div>
+          {hasFloor && (
+            <div className="fj-acct-row">
+              <span>Drawdown floor {mode !== "static" && !locked ? "(trailing)" : mode !== "static" && locked ? "(locked)" : ""}</span>
+              <b>{money(floor)}</b>
             </div>
-          ))}
-        </div>
+          )}
+          {isEvalWithTarget && (
+            <div className="fj-acct-row"><span>Profit target</span><b>{money(account.startingBalance + profitTarget)}</b></div>
+          )}
+          <div className="fj-acct-row"><span>Trading P&amp;L (tagged trades)</span><b className={tradingPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(tradingPnl)}</b></div>
+          <div className="fj-acct-row"><span>Total paid out</span><b>{money(totalPaidOut)}</b></div>
+          {totalAdjustments !== 0 && (
+            <div className="fj-acct-row"><span>Manual adjustments</span><b className={totalAdjustments >= 0 ? "fj-profit" : "fj-loss"}>{money(totalAdjustments)}</b></div>
+          )}
+          <div className="fj-acct-row"><span>Last trading day P&amp;L</span><b className={lastDayPnl === null ? "fj-neutral" : lastDayPnl >= 0 ? "fj-profit" : "fj-loss"}>{lastDayPnl === null ? "—" : money(lastDayPnl)}</b></div>
+          {hasFloor && (
+            <div className="fj-acct-row">
+              <span>Distance to floor</span>
+              <b className={distanceToFloor >= 0 ? "fj-profit" : "fj-loss"}>{money(distanceToFloor)}</b>
+            </div>
+          )}
+          <div className="fj-acct-row"><span>Trades tagged here</span><b>{taggedTrades.length}</b></div>
+
+          <form onSubmit={submitPayout} className="fj-acct-updateform">
+            <div className="fj-form-field" style={{ flex: 1 }}>
+              <label>Payout date</label>
+              <input type="date" className="fj-input" value={payoutDate} onChange={(e) => setPayoutDate(e.target.value)} />
+            </div>
+            <div className="fj-form-field" style={{ flex: 1 }}>
+              <label>Amount paid out ($)</label>
+              <input type="number" step="0.01" className="fj-input" placeholder="1000" value={payoutAmount} onChange={(e) => setPayoutAmount(e.target.value)} />
+            </div>
+            <button type="submit" className="fj-btn primary" style={{ height: 37 }}>Log payout</button>
+          </form>
+
+          {(account.payouts || []).length > 0 && (
+            <div className="fj-acct-history">
+              {[...account.payouts].sort((a, b) => b.date.localeCompare(a.date)).map((p) => (
+                <div key={p.id} className="fj-acct-history-row">
+                  <span>{p.date}</span>
+                  <b>{money(p.amount)}</b>
+                  <button className="fj-iconbtn" style={{ padding: 2 }} onClick={() => onRemovePayout(p.id)}><X size={12} /></button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {showAdjustments && (
+            <>
+              <form onSubmit={submitAdjustment} className="fj-acct-updateform" style={{ marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
+                <div className="fj-form-field" style={{ flex: 1 }}>
+                  <label>Balance fix date</label>
+                  <input type="date" className="fj-input" value={adjDate} onChange={(e) => setAdjDate(e.target.value)} />
+                </div>
+                <div className="fj-form-field" style={{ flex: 1 }}>
+                  <label>Adjustment ($, + or -)</label>
+                  <input type="number" step="0.01" className="fj-input" placeholder="-25.00" value={adjAmount} onChange={(e) => setAdjAmount(e.target.value)} />
+                </div>
+                <button type="submit" className="fj-btn" style={{ height: 37 }}>Apply fix</button>
+              </form>
+              <div className="fj-sub" style={{ marginTop: 4, marginBottom: 4 }}>
+                Use this to correct the balance when it drifts from reality (a missed fee, a broker adjustment) — it doesn't touch the drawdown floor or any trade.
+              </div>
+              <input
+                className="fj-input" style={{ fontFamily: "Inter, sans-serif", width: "100%", marginBottom: 8 }}
+                placeholder="Optional note (e.g. 'missed commission on 7/12')" value={adjNote} onChange={(e) => setAdjNote(e.target.value)}
+              />
+
+              {(account.adjustments || []).length > 0 && (
+                <div className="fj-acct-history">
+                  {[...account.adjustments].sort((a, b) => b.date.localeCompare(a.date)).map((adj) => (
+                    <div key={adj.id} className="fj-acct-history-row">
+                      <span>{adj.date}{adj.note ? ` · ${adj.note}` : ""}</span>
+                      <b className={adj.amount >= 0 ? "fj-profit" : "fj-loss"}>{money(adj.amount)}</b>
+                      <button className="fj-iconbtn" style={{ padding: 2 }} onClick={() => onRemoveAdjustment(adj.id)}><X size={12} /></button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+        </>
       )}
     </div>
+  );
+}
+
+function AccountDetailsEditor({ account, onSave, onCancel }) {
+  const [name, setName] = useState(account.name);
+  const [isCash, setIsCash] = useState(!!account.isCash);
+  const [startingBalance, setStartingBalance] = useState(account.startingBalance);
+  const [minimum, setMinimum] = useState(account.minimum || 0);
+  const [drawdownType, setDrawdownType] = useState(account.drawdownType || "eod");
+  const [drawdownAmount, setDrawdownAmount] = useState(account.drawdownAmount || 0);
+  const [profitTarget, setProfitTarget] = useState(account.profitTarget || 0);
+  const [trailingLock, setTrailingLock] = useState(account.trailingLock || "target");
+  const [error, setError] = useState("");
+
+  const submit = (e) => {
+    e.preventDefault();
+    const trimmed = name.trim();
+    if (!trimmed) { setError("Account name can't be empty."); return; }
+    onSave({
+      name: trimmed,
+      isCash,
+      startingBalance: Number(startingBalance) || 0,
+      minimum: Number(minimum) || 0,
+      drawdownType: isCash ? "static" : drawdownType,
+      drawdownAmount: isCash ? 0 : Number(drawdownAmount) || 0,
+      profitTarget: isCash ? 0 : Number(profitTarget) || 0,
+      trailingLock,
+    });
+  };
+
+  return (
+    <form onSubmit={submit} style={{ marginTop: 10, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+      <div className="fj-form-field" style={{ marginBottom: 8 }}>
+        <label>Account name</label>
+        <input className="fj-input" style={{ fontFamily: "Inter, sans-serif" }} value={name} onChange={(e) => setName(e.target.value)} />
+      </div>
+      <div className="fj-form-row" style={{ gridTemplateColumns: (isCash || !Number(drawdownAmount)) ? "1fr 1fr" : "1fr", marginBottom: 8 }}>
+        <div className="fj-form-field">
+          <label>Starting balance ($)</label>
+          <input type="number" step="0.01" className="fj-input" value={startingBalance} onChange={(e) => setStartingBalance(e.target.value)} />
+        </div>
+        {(isCash || !Number(drawdownAmount)) && (
+          <div className="fj-form-field">
+            <label>Flat minimum ($, optional)</label>
+            <input type="number" step="0.01" className="fj-input" value={minimum} onChange={(e) => setMinimum(e.target.value)} />
+          </div>
+        )}
+      </div>
+      <label style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12.5, color: "var(--text-dim)", margin: "2px 0 10px", cursor: "pointer" }}>
+        <input type="checkbox" checked={isCash} onChange={(e) => setIsCash(e.target.checked)} />
+        This is a cash account (no evaluation/funded status, no drawdown tracking)
+      </label>
+      {!isCash && (
+        <>
+          <div className="fj-form-row" style={{ gridTemplateColumns: "1fr 1fr 1fr", marginBottom: 8 }}>
+            <div className="fj-form-field">
+              <label>Drawdown type</label>
+              <select className="fj-select" value={drawdownType} onChange={(e) => setDrawdownType(e.target.value)}>
+                <option value="eod">EOD</option>
+                <option value="intraday">Intraday</option>
+                <option value="static">Static</option>
+              </select>
+            </div>
+            <div className="fj-form-field">
+              <label>Max drawdown ($)</label>
+              <input type="number" step="0.01" className="fj-input" value={drawdownAmount} onChange={(e) => setDrawdownAmount(e.target.value)} />
+            </div>
+            <div className="fj-form-field">
+              <label>Profit target ($)</label>
+              <input type="number" step="0.01" className="fj-input" value={profitTarget} onChange={(e) => setProfitTarget(e.target.value)} />
+            </div>
+          </div>
+          {!!Number(drawdownAmount) && (
+            <div className="fj-sub" style={{ marginBottom: 10 }}>
+              Flat minimum is hidden above because Max drawdown is set — the drawdown floor governs instead.
+            </div>
+          )}
+          {drawdownType !== "static" && (
+            <div className="fj-form-field" style={{ marginBottom: 10 }}>
+              <label>Trailing locks at</label>
+              <select className="fj-select" value={trailingLock} onChange={(e) => setTrailingLock(e.target.value)}>
+                <option value="target">Profit target reached</option>
+                <option value="starting">Starting balance reached</option>
+                <option value="none">Never — always trails</option>
+              </select>
+            </div>
+          )}
+        </>
+      )}
+      {error && <div className="fj-loss" style={{ fontSize: 12, marginBottom: 8 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <button type="button" className="fj-btn" onClick={onCancel}>Cancel</button>
+        <button type="submit" className="fj-btn primary">Save details</button>
+      </div>
+    </form>
   );
 }
 
