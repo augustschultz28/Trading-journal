@@ -777,7 +777,7 @@ export default function TradingJournal() {
         )
       )}
       {view === "calendar" && (
-        <CalendarView trades={trades} strategies={strategies} />
+        <CalendarView trades={trades} strategies={strategies} settings={settings} />
       )}
       {view === "accounts" && (
         <AccountsView accounts={accounts} setAccounts={setAccounts} trades={trades} setTrades={setTrades} />
@@ -1984,15 +1984,24 @@ function TradeLog({ trades, onEdit, onDelete }) {
 
 // ---------- calendar view ----------
 
-function CalendarView({ trades, strategies }) {
+function CalendarView({ trades, strategies, settings }) {
   const today = new Date();
   const [cursor, setCursor] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
   const [selectedStrategy, setSelectedStrategy] = useState("ALL");
   const [mode, setMode] = useState("month"); // "month" | "year"
+  const [category, setCategory] = useState("all"); // all | micro | mini
+
+  const hasMicro = Object.values(settings).some((m) => (m.category || "micro") === "micro");
+  const hasMini = Object.values(settings).some((m) => m.category === "mini");
+
+  const categoryFiltered = useMemo(
+    () => category === "all" ? trades : trades.filter((t) => (settings[t.market]?.category || "micro") === category),
+    [trades, settings, category]
+  );
 
   const scoped = useMemo(
-    () => selectedStrategy === "ALL" ? trades : trades.filter((t) => t.strategy === selectedStrategy),
-    [trades, selectedStrategy]
+    () => selectedStrategy === "ALL" ? categoryFiltered : categoryFiltered.filter((t) => t.strategy === selectedStrategy),
+    [categoryFiltered, selectedStrategy]
   );
 
   const byDate = useMemo(() => {
@@ -2051,6 +2060,13 @@ function CalendarView({ trades, strategies }) {
               </span>
             ))}
           </div>
+          {(hasMicro && hasMini) && (
+            <div className="fj-seg-toggle">
+              <button className={`fj-seg-btn ${category === "all" ? "active" : ""}`} onClick={() => setCategory("all")}>All contracts</button>
+              <button className={`fj-seg-btn ${category === "micro" ? "active" : ""}`} onClick={() => setCategory("micro")}>Micro only</button>
+              <button className={`fj-seg-btn ${category === "mini" ? "active" : ""}`} onClick={() => setCategory("mini")}>Mini only</button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -2334,7 +2350,7 @@ function DetailView({ selected, trades, settings, strategies, onBack, onNavigate
             <EquityChart curve={curve} color={accent} />
           </div>
 
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
             <div className="fj-panel">
               <p className="fj-panel-title">Daily &amp; weekly P&amp;L</p>
               <CalendarHeatmap trades={entityTrades} />
@@ -2343,16 +2359,15 @@ function DetailView({ selected, trades, settings, strategies, onBack, onNavigate
               <p className="fj-panel-title">Day of week × hour of day</p>
               <DowHourHeatmap trades={entityTrades} />
             </div>
+            <div className="fj-panel">
+              <p className="fj-panel-title">Every trade, plotted</p>
+              <TradeScatterChart trades={entityTrades} settings={settings} strategies={strategies} />
+            </div>
           </div>
 
           <div className="fj-panel">
             <p className="fj-panel-title">Stats by time window</p>
             <WindowStatsPanel trades={entityTrades} />
-          </div>
-
-          <div className="fj-panel">
-            <p className="fj-panel-title">Every trade, plotted</p>
-            <TradeScatterChart trades={entityTrades} settings={settings} strategies={strategies} />
           </div>
 
           <div className="fj-panel">
@@ -2579,20 +2594,20 @@ function CalendarHeatmap({ trades }) {
 
   return (
     <div style={{ overflowX: "auto" }}>
-      <div style={{ display: "flex", gap: 3 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 3, marginRight: 2 }}>
+      <div style={{ display: "flex", gap: 4 }}>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4, marginRight: 3 }}>
           {DOW_LABELS_SHORT.map((l, i) => (
-            <div key={i} className="fj-sub" style={{ width: 14, height: 14, fontSize: 9, textAlign: "center" }}>{l}</div>
+            <div key={i} className="fj-sub" style={{ width: 18, height: 18, fontSize: 10, display: "flex", alignItems: "center", justifyContent: "center" }}>{l}</div>
           ))}
         </div>
         {weeks.map((week, wi) => (
-          <div key={wi} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+          <div key={wi} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
             {week.map((d) => (
               <div
                 key={d.key}
                 title={d.count ? `${d.key} · ${d.count} trade${d.count === 1 ? "" : "s"} · ${money(d.pnl)}` : `${d.key} · no trades`}
                 style={{
-                  width: 14, height: 14, borderRadius: 3,
+                  width: 18, height: 18, borderRadius: 4,
                   background: d.count ? heatColor(d.pnl, maxAbs) : "rgba(139,146,158,0.06)",
                   border: "1px solid #2B303A",
                 }}
