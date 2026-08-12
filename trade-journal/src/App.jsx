@@ -1204,7 +1204,7 @@ function SortToggle({ value, onChange }) {
 }
 
 function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAccounts }) {
-  const [visibleStrategies, setVisibleStrategies] = useState([]);
+  const [selectedStrategies, setSelectedStrategies] = useState([]);
   const [category, setCategory] = useState("all"); // all | micro | mini
   const [marketSort, setMarketSort] = useState("pnl");
   const [strategySort, setStrategySort] = useState("pnl");
@@ -1212,30 +1212,40 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
   const hasMicro = Object.values(settings).some((m) => (m.category || "micro") === "micro");
   const hasMini = Object.values(settings).some((m) => m.category === "mini");
 
-  const scopedTrades = useMemo(() => {
+  // Category-only scope — drives the market row and strategy grid, so every
+  // strategy/market stays visible to browse and toggle even while filtered.
+  const categoryScopedTrades = useMemo(() => {
     if (category === "all") return trades;
     return trades.filter((t) => (settings[t.market]?.category || "micro") === category);
   }, [trades, settings, category]);
 
-  const stats = useMemo(() => calcStats(scopedTrades), [scopedTrades]);
-  const multiCurve = useMemo(() => buildMultiEquityCurve(scopedTrades, strategies), [scopedTrades, strategies]);
+  // Category + selected-strategy scope — drives the stat grid and the main
+  // equity curve, so picking strategy chips actually narrows the numbers,
+  // not just overlays extra lines on top of the unfiltered portfolio.
+  const statsScopedTrades = useMemo(() => {
+    if (selectedStrategies.length === 0) return categoryScopedTrades;
+    return categoryScopedTrades.filter((t) => selectedStrategies.includes(t.strategy));
+  }, [categoryScopedTrades, selectedStrategies]);
+
+  const stats = useMemo(() => calcStats(statsScopedTrades), [statsScopedTrades]);
+  const multiCurve = useMemo(() => buildMultiEquityCurve(statsScopedTrades, strategies), [statsScopedTrades, strategies]);
 
   const byMarket = useMemo(() => {
     const list = Object.keys(settings)
       .filter((m) => category === "all" || (settings[m].category || "micro") === category)
       .map((m) => {
-        const marketTrades = scopedTrades.filter((t) => t.market === m);
+        const marketTrades = categoryScopedTrades.filter((t) => t.market === m);
         return { key: m, ...settings[m], stats: calcStats(marketTrades) };
       });
     return sortGroups(list, marketSort);
-  }, [settings, scopedTrades, category, marketSort]);
+  }, [settings, categoryScopedTrades, category, marketSort]);
 
   const byStrategy = useMemo(() => {
-    const names = Array.from(new Set(scopedTrades.map((t) => t.strategy).filter(Boolean)));
+    const names = Array.from(new Set(categoryScopedTrades.map((t) => t.strategy).filter(Boolean)));
     const list = names
-      .map((s) => ({ key: s, stats: calcStats(scopedTrades.filter((t) => t.strategy === s)), curve: equityCurve(scopedTrades.filter((t) => t.strategy === s)) }));
+      .map((s) => ({ key: s, stats: calcStats(categoryScopedTrades.filter((t) => t.strategy === s)), curve: equityCurve(categoryScopedTrades.filter((t) => t.strategy === s)) }));
     return sortGroups(list, strategySort);
-  }, [scopedTrades, strategySort]);
+  }, [categoryScopedTrades, strategySort]);
 
   const acctRollup = useMemo(() => {
     if (accounts.length === 0) return null;
@@ -1251,7 +1261,7 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
   }, [accounts, trades]);
 
   const colorFor = (s) => ACCENT_PALETTE[strategies.indexOf(s) % ACCENT_PALETTE.length];
-  const toggleStrategy = (s) => setVisibleStrategies((v) => v.includes(s) ? v.filter((x) => x !== s) : [...v, s]);
+  const toggleStrategy = (s) => setSelectedStrategies((v) => v.includes(s) ? v.filter((x) => x !== s) : [...v, s]);
 
   return (
     <div>
@@ -1271,9 +1281,9 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
         <p className="fj-panel-title">Equity curve</p>
         {strategies.length > 0 && (
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 10 }}>
-            <span className="fj-sub" style={{ marginRight: 2 }}>Overlay strategies:</span>
+            <span className="fj-sub" style={{ marginRight: 2 }}>Filter by strategy:</span>
             {strategies.map((s) => {
-              const active = visibleStrategies.includes(s);
+              const active = selectedStrategies.includes(s);
               const c = colorFor(s);
               return (
                 <span
@@ -1286,12 +1296,12 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
                 </span>
               );
             })}
-            {visibleStrategies.length > 0 && (
-              <span className="fj-chip" onClick={() => setVisibleStrategies([])}>Clear</span>
+            {selectedStrategies.length > 0 && (
+              <span className="fj-chip" onClick={() => setSelectedStrategies([])}>Clear</span>
             )}
           </div>
         )}
-        <PortfolioEquityChart data={multiCurve} strategies={strategies} visible={visibleStrategies} colorFor={colorFor} />
+        <PortfolioEquityChart data={multiCurve} strategies={strategies} visible={selectedStrategies} colorFor={colorFor} />
       </div>
 
       {acctRollup && (
