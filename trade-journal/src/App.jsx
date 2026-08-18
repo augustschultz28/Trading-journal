@@ -1,7 +1,8 @@
-import React, { useState, useEffect, useMemo, useCallback, useRef } from "react";
+import React, { useState, useEffect, useMemo, useCallback, useRef, useId } from "react";
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
-  ResponsiveContainer, BarChart, Bar, ReferenceLine, ScatterChart, Scatter, Cell
+  ResponsiveContainer, BarChart, Bar, ReferenceLine, ScatterChart, Scatter, Cell,
+  Area, ComposedChart
 } from "recharts";
 import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, RotateCcw, Settings2, ChevronLeft, ChevronRight, ArrowLeft, Upload, Download } from "lucide-react";
 import Papa from "papaparse";
@@ -1096,14 +1097,14 @@ function TradeLogView({ trades, strategies, accounts, settings, onEdit, onDelete
 
 function StatGrid({ stats }) {
   const items = [
-    ["Total P&L", money(stats.totalPnl), stats.totalPnl >= 0 ? "fj-profit" : "fj-loss"],
+    ["Total P&L", stats.n ? money(stats.totalPnl) : "—", stats.totalPnl >= 0 ? "fj-profit" : "fj-loss"],
     ["Trades", stats.n, ""],
     ["Win rate", stats.n ? pct(stats.winRate) : "—", ""],
     ["Profit factor", stats.profitFactor === null ? "—" : stats.profitFactor === Infinity ? "∞" : stats.profitFactor.toFixed(2), ""],
-    ["Avg win", money(stats.avgWin), "fj-profit"],
-    ["Avg loss", money(-stats.avgLoss), "fj-loss"],
-    ["Expectancy / trade", money(stats.expectancy), stats.expectancy >= 0 ? "fj-profit" : "fj-loss"],
-    ["Max drawdown", money(-stats.maxDD), "fj-loss"],
+    ["Avg win", stats.n ? money(stats.avgWin) : "—", "fj-profit"],
+    ["Avg loss", stats.n ? money(-stats.avgLoss) : "—", "fj-loss"],
+    ["Expectancy / trade", stats.n ? money(stats.expectancy) : "—", stats.expectancy >= 0 ? "fj-profit" : "fj-loss"],
+    ["Max drawdown", stats.n ? money(-stats.maxDD) : "—", "fj-loss"],
     ["Longest win streak", stats.n ? `${stats.maxWinStreak} trade${stats.maxWinStreak === 1 ? "" : "s"}` : "—", "fj-profit"],
     ["Longest loss streak", stats.n ? `${stats.maxLossStreak} trade${stats.maxLossStreak === 1 ? "" : "s"}` : "—", "fj-loss"],
   ];
@@ -1121,53 +1122,130 @@ function StatGrid({ stats }) {
 
 // ---------- equity chart ----------
 
+// Builds hard-edged gradient stops (green rising / red falling) for a
+// single Area spanning the full curve. Earlier this was done with one Area
+// per direction-run, each given its own slice of the data — that broke
+// Recharts' hover tracking, since a series with a partial/offset data array
+// doesn't line up with the shared cursor position the same way the full
+// series does. A single Area using the exact same data as the Line sidesteps
+// that entirely; the color transitions are done visually via the gradient.
+function buildTrendGradientStops(points, key) {
+  if (points.length < 2) return [];
+  const n = points.length;
+  const pct = (idx) => `${((idx / (n - 1)) * 100).toFixed(3)}%`;
+  const colorFor = (dir) => (dir === "up" ? "#5FA37A" : "#C2634A");
+  let dir = points[1][key] >= points[0][key] ? "up" : "down";
+  const stops = [{ offset: pct(0), color: colorFor(dir) }];
+  for (let i = 1; i < n - 1; i++) {
+    const nextDir = points[i + 1][key] >= points[i][key] ? "up" : "down";
+    if (nextDir !== dir) {
+      stops.push({ offset: pct(i), color: colorFor(dir) });
+      stops.push({ offset: pct(i), color: colorFor(nextDir) });
+      dir = nextDir;
+    }
+  }
+  stops.push({ offset: pct(n - 1), color: colorFor(dir) });
+  return stops;
+}
+
+// Custom tooltip for the banded equity charts. The Area segments share the
+// same field as the real Line (so the colored bands line up), which makes
+// Recharts treat each segment as its own tooltip entry — duplicating
+// "Portfolio: $X" once per band near a boundary. Giving the Area segments a
+// function-based dataKey (instead of the string the real Line uses) lets us
+// filter them out here, so only the real line(s) show up.
+function ChartTooltip({ active, payload, label }) {
+  if (!active || !payload || payload.length === 0) return null;
+  const real = payload.filter((p) => typeof p.dataKey === "string");
+  if (real.length === 0) return null;
+  const labelFor = (key) => key === "portfolio" ? "Portfolio" : key === "equity" ? "Equity" : key;
+  return (
+    <div style={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, padding: "8px 10px", fontFamily: "JetBrains Mono", fontSize: 12 }}>
+      <div style={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}>{`Trade #${label}`}</div>
+      {real.map((entry) => (
+        <div key={entry.dataKey} style={{ color: entry.stroke || "#E7E5E0" }}>
+          {`${labelFor(entry.dataKey)}: ${money(entry.value)}`}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function HighLineLabel({ viewBox, peak, date }) {
+  if (!viewBox) return null;
+  const x = viewBox.x + 5;
+  const yBase = viewBox.y + viewBox.height - (date ? 24 : 12);
+  return (
+    <g>
+      <text x={x} y={yBase} fill="#5FA37A" fontSize={10.5} fontFamily="JetBrains Mono" fontWeight={600}>{`High ${money(peak)}`}</text>
+      {date && <text x={x} y={yBase + 13} fill="#5FA37A" fontSize={9.5} fontFamily="JetBrains Mono" opacity={0.8}>{date}</text>}
+    </g>
+  );
+}
+
 function EquityChart({ curve, color = "#D9A441" }) {
+  const gradId = useId();
   if (curve.length === 0) {
     return <div className="fj-empty">No trades yet — add one to start the equity curve.</div>;
   }
+  const peak = Math.max(...curve.map((p) => p.equity));
+  const peakPoint = curve.find((p) => p.equity === peak);
+  const stops = buildTrendGradientStops(curve, "equity");
   return (
     <ResponsiveContainer width="100%" height={220}>
-      <LineChart data={curve} margin={{ top: 8, right: 12, left: -10, bottom: 0 }}>
+      <ComposedChart data={curve} margin={{ top: 8, right: 12, left: -10, bottom: 0 }}>
+        <defs>
+          <linearGradient id={`eqFill-${gradId}`} x1="0" y1="0" x2="1" y2="0">
+            {stops.map((s, idx) => <stop key={idx} offset={s.offset} stopColor={s.color} stopOpacity={0.22} />)}
+          </linearGradient>
+        </defs>
         <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
-        <XAxis dataKey="i" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+        <XAxis dataKey="i" type="number" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
         <YAxis stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-        <ReferenceLine y={0} stroke="#3A4150" />
-        <Tooltip
-          contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
-          labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
-          itemStyle={{ color: "#E7E5E0" }}
-          formatter={(v) => [money(v), "Equity"]}
-          labelFormatter={(i) => `Trade #${i}`}
+        <Area
+          dataKey={(d) => d.equity} type="monotone" stroke="none"
+          fill={`url(#eqFill-${gradId})`} isAnimationActive={false} legendType="none"
         />
+        <ReferenceLine y={0} stroke="#3A4150" />
+        <ReferenceLine x={peakPoint?.i} stroke="#5FA37A" strokeDasharray="4 3" label={<HighLineLabel peak={peak} date={peakPoint?.date} />} />
+        <Tooltip content={<ChartTooltip />} cursor={{ stroke: "#3A4150", strokeDasharray: "3 3" }} />
         <Line type="monotone" dataKey="equity" stroke={color} strokeWidth={2} dot={false} />
-      </LineChart>
+      </ComposedChart>
     </ResponsiveContainer>
   );
 }
 
 function PortfolioEquityChart({ data, strategies, visible, colorFor }) {
+  const gradId = useId();
   if (!data || data.length === 0) {
     return <div className="fj-empty">No trades yet — add one to start the equity curve.</div>;
   }
+  const peak = Math.max(...data.map((p) => p.portfolio));
+  const peakPoint = data.find((p) => p.portfolio === peak);
+  const stops = buildTrendGradientStops(data, "portfolio");
   return (
     <ResponsiveContainer width="100%" height={260}>
-      <LineChart data={data} margin={{ top: 8, right: 12, left: -10, bottom: 0 }}>
+      <ComposedChart data={data} margin={{ top: 8, right: 12, left: -10, bottom: 0 }}>
+        <defs>
+          <linearGradient id={`pfFill-${gradId}`} x1="0" y1="0" x2="1" y2="0">
+            {stops.map((s, idx) => <stop key={idx} offset={s.offset} stopColor={s.color} stopOpacity={0.2} />)}
+          </linearGradient>
+        </defs>
         <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
-        <XAxis dataKey="i" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+        <XAxis dataKey="i" type="number" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
         <YAxis stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-        <ReferenceLine y={0} stroke="#3A4150" />
-        <Tooltip
-          contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
-          labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
-          itemStyle={{ color: "#E7E5E0" }}
-          formatter={(v, name) => [money(v), name === "portfolio" ? "Portfolio" : name]}
-          labelFormatter={(i) => `Trade #${i}`}
+        <Area
+          dataKey={(d) => d.portfolio} type="monotone" stroke="none"
+          fill={`url(#pfFill-${gradId})`} isAnimationActive={false} legendType="none"
         />
+        <ReferenceLine y={0} stroke="#3A4150" />
+        <ReferenceLine x={peakPoint?.i} stroke="#5FA37A" strokeDasharray="4 3" label={<HighLineLabel peak={peak} date={peakPoint?.date} />} />
+        <Tooltip content={<ChartTooltip />} cursor={{ stroke: "#3A4150", strokeDasharray: "3 3" }} />
         {strategies.filter((s) => visible.includes(s)).map((s) => (
           <Line key={s} type="monotone" dataKey={s} stroke={colorFor(s)} strokeWidth={1.5} strokeOpacity={0.5} dot={false} isAnimationActive={false} />
         ))}
         <Line type="monotone" dataKey="portfolio" stroke="#D9A441" strokeWidth={2.5} dot={false} isAnimationActive={false} />
-      </LineChart>
+      </ComposedChart>
     </ResponsiveContainer>
   );
 }
@@ -1375,7 +1453,7 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
                 <ResponsiveContainer width="100%" height={40}>
                   <LineChart data={s.curve} margin={{ top: 6, right: 0, left: 0, bottom: 0 }}>
                     <YAxis hide domain={["dataMin", "dataMax"]} />
-                    <Line type="monotone" dataKey="equity" stroke={colorFor(s.key)} strokeWidth={1.75} dot={false} isAnimationActive={false} />
+                    <Line type="monotone" dataKey="equity" stroke={isProfit ? "#5FA37A" : "#C2634A"} strokeWidth={1.75} dot={false} isAnimationActive={false} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -1383,6 +1461,11 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
           })}
         </div>
       )}
+
+      <div className="fj-section-label">Advanced stats</div>
+      <div className="fj-panel">
+        <WindowStatsPanel trades={statsScopedTrades} />
+      </div>
     </div>
   );
 }
@@ -1997,7 +2080,7 @@ function TradeLog({ trades, onEdit, onDelete }) {
 function CalendarView({ trades, strategies, settings }) {
   const today = new Date();
   const [cursor, setCursor] = useState(new Date(today.getFullYear(), today.getMonth(), 1));
-  const [selectedStrategy, setSelectedStrategy] = useState("ALL");
+  const [selectedStrategies, setSelectedStrategies] = useState([]);
   const [mode, setMode] = useState("month"); // "month" | "year"
   const [category, setCategory] = useState("all"); // all | micro | mini
 
@@ -2010,9 +2093,11 @@ function CalendarView({ trades, strategies, settings }) {
   );
 
   const scoped = useMemo(
-    () => selectedStrategy === "ALL" ? categoryFiltered : categoryFiltered.filter((t) => t.strategy === selectedStrategy),
-    [categoryFiltered, selectedStrategy]
+    () => selectedStrategies.length === 0 ? categoryFiltered : categoryFiltered.filter((t) => selectedStrategies.includes(t.strategy)),
+    [categoryFiltered, selectedStrategies]
   );
+
+  const toggleStrategy = (s) => setSelectedStrategies((v) => v.includes(s) ? v.filter((x) => x !== s) : [...v, s]);
 
   const byDate = useMemo(() => {
     const map = {};
@@ -2061,14 +2146,17 @@ function CalendarView({ trades, strategies, settings }) {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 6 }}>
           <span className="fj-sub">Strategy:</span>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap", flex: 1 }}>
-            <span className={`fj-chip ${selectedStrategy === "ALL" ? "active" : ""}`} onClick={() => setSelectedStrategy("ALL")}>
-              All strategies combined
-            </span>
-            {strategies.map((s) => (
-              <span key={s} className={`fj-chip ${selectedStrategy === s ? "active" : ""}`} onClick={() => setSelectedStrategy(s)}>
-                {s}
-              </span>
-            ))}
+            {strategies.map((s) => {
+              const active = selectedStrategies.includes(s);
+              return (
+                <span key={s} className={`fj-chip ${active ? "active" : ""}`} onClick={() => toggleStrategy(s)}>
+                  {s}
+                </span>
+              );
+            })}
+            {selectedStrategies.length > 0 && (
+              <span className="fj-chip" onClick={() => setSelectedStrategies([])}>Clear</span>
+            )}
           </div>
           {(hasMicro && hasMini) && (
             <div className="fj-seg-toggle">
@@ -2245,6 +2333,14 @@ function WindowStatsPanel({ trades }) {
   const rows = buckets.map((b) => ({ ...b, stats: calcStats(b.trades) }));
   const barData = rows.map((r) => ({ name: r.label, pnl: r.stats.totalPnl }));
 
+  const rowsWithTrades = rows.filter((r) => r.stats.n > 0);
+  const bestRow = rowsWithTrades.length ? rowsWithTrades.reduce((a, b) => b.stats.totalPnl > a.stats.totalPnl ? b : a) : null;
+  const worstRow = rowsWithTrades.length ? rowsWithTrades.reduce((a, b) => b.stats.totalPnl < a.stats.totalPnl ? b : a) : null;
+  const allWins = trades.filter((t) => t.pnl > 0);
+  const allLosses = trades.filter((t) => t.pnl < 0);
+  const largestWin = allWins.length ? Math.max(...allWins.map((t) => t.pnl)) : null;
+  const largestLoss = allLosses.length ? Math.min(...allLosses.map((t) => t.pnl)) : null;
+
   return (
     <div>
       <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
@@ -2267,6 +2363,31 @@ function WindowStatsPanel({ trades }) {
         <div className="fj-empty">No trades in this scope{isTimeWindow ? " — trades need a logged time to appear in 15/30/60-min windows." : "."}</div>
       ) : (
         <>
+          <div className="fj-stat-grid">
+            {bestRow && (
+              <div className="fj-stat-card">
+                <div className="fj-stat-label">Best window</div>
+                <div className="fj-stat-value fj-profit" style={{ fontSize: 15 }}>{bestRow.label}</div>
+                <div className="fj-sub">{money(bestRow.stats.totalPnl)}</div>
+              </div>
+            )}
+            {worstRow && (
+              <div className="fj-stat-card">
+                <div className="fj-stat-label">Worst window</div>
+                <div className="fj-stat-value fj-loss" style={{ fontSize: 15 }}>{worstRow.label}</div>
+                <div className="fj-sub">{money(worstRow.stats.totalPnl)}</div>
+              </div>
+            )}
+            <div className="fj-stat-card">
+              <div className="fj-stat-label">Largest single win</div>
+              <div className="fj-stat-value fj-profit">{largestWin !== null ? money(largestWin) : "—"}</div>
+            </div>
+            <div className="fj-stat-card">
+              <div className="fj-stat-label">Largest single loss</div>
+              <div className="fj-stat-value fj-loss">{largestLoss !== null ? money(largestLoss) : "—"}</div>
+            </div>
+          </div>
+
           <ResponsiveContainer width="100%" height={190}>
             <BarChart data={barData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
               <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
@@ -2290,17 +2411,19 @@ function WindowStatsPanel({ trades }) {
             <table className="fj-table">
               <thead>
                 <tr>
-                  <th>Window</th><th>Trades</th><th>Win %</th><th>P&amp;L</th><th>Avg P&amp;L</th><th>Profit Factor</th>
+                  <th>Window</th><th>Trades</th><th>Win %</th><th>P&amp;L</th><th>Avg P&amp;L</th><th>Avg Win</th><th>Avg Loss</th><th>Profit Factor</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((r) => (
                   <tr key={r.key}>
                     <td>{r.label}</td>
-                    <td>{r.stats.n}</td>
+                    <td>{r.stats.n} <span style={{ color: "#8B929E" }}>({r.stats.wins}W/{r.stats.losses}L)</span></td>
                     <td>{pct(r.stats.winRate)}</td>
                     <td className={r.stats.totalPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(r.stats.totalPnl)}</td>
                     <td className={r.stats.expectancy >= 0 ? "fj-profit" : "fj-loss"}>{money(r.stats.expectancy)}</td>
+                    <td className="fj-profit">{r.stats.wins ? money(r.stats.avgWin) : "—"}</td>
+                    <td className="fj-loss">{r.stats.losses ? money(-r.stats.avgLoss) : "—"}</td>
                     <td>{r.stats.profitFactor === null ? "—" : r.stats.profitFactor === Infinity ? "∞" : r.stats.profitFactor.toFixed(2)}</td>
                   </tr>
                 ))}
