@@ -1095,6 +1095,36 @@ function TradeLogView({ trades, strategies, accounts, settings, onEdit, onDelete
 
 // ---------- stat grid ----------
 
+function LongShortTable({ longStats, shortStats }) {
+  const row = (label, s) => (
+    <tr key={label}>
+      <td style={{ fontFamily: "Inter, sans-serif", fontWeight: 600 }}>{label}</td>
+      <td>{s.n}</td>
+      <td>{s.n ? pct(s.winRate) : "—"}</td>
+      <td className={s.n ? (s.totalPnl >= 0 ? "fj-profit" : "fj-loss") : "fj-neutral"}>{s.n ? money(s.totalPnl) : "—"}</td>
+      <td className={s.n ? (s.expectancy >= 0 ? "fj-profit" : "fj-loss") : "fj-neutral"}>{s.n ? money(s.expectancy) : "—"}</td>
+      <td className="fj-profit">{s.wins ? money(s.avgWin) : "—"}</td>
+      <td className="fj-loss">{s.losses ? money(-s.avgLoss) : "—"}</td>
+      <td>{s.profitFactor === null ? "—" : s.profitFactor === Infinity ? "∞" : s.profitFactor.toFixed(2)}</td>
+    </tr>
+  );
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <table className="fj-table">
+        <thead>
+          <tr>
+            <th>Direction</th><th>Trades</th><th>Win %</th><th>P&amp;L</th><th>Avg P&amp;L</th><th>Avg Win</th><th>Avg Loss</th><th>Profit Factor</th>
+          </tr>
+        </thead>
+        <tbody>
+          {row("Long", longStats)}
+          {row("Short", shortStats)}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
 function StatGrid({ stats }) {
   const items = [
     ["Total P&L", stats.n ? money(stats.totalPnl) : "—", stats.totalPnl >= 0 ? "fj-profit" : "fj-loss"],
@@ -1307,6 +1337,8 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
 
   const stats = useMemo(() => calcStats(statsScopedTrades), [statsScopedTrades]);
   const multiCurve = useMemo(() => buildMultiEquityCurve(statsScopedTrades, strategies), [statsScopedTrades, strategies]);
+  const longStats = useMemo(() => calcStats(statsScopedTrades.filter((t) => t.direction === "Long")), [statsScopedTrades]);
+  const shortStats = useMemo(() => calcStats(statsScopedTrades.filter((t) => t.direction === "Short")), [statsScopedTrades]);
 
   const byMarket = useMemo(() => {
     const list = Object.keys(settings)
@@ -1460,6 +1492,15 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
             );
           })}
         </div>
+      )}
+
+      {stats.n > 0 && (
+        <>
+          <div className="fj-section-label">Long vs Short</div>
+          <div className="fj-panel">
+            <LongShortTable longStats={longStats} shortStats={shortStats} />
+          </div>
+        </>
       )}
 
       <div className="fj-section-label">Advanced stats</div>
@@ -2449,6 +2490,10 @@ function DetailView({ selected, trades, settings, strategies, onBack, onNavigate
   );
   const stats = useMemo(() => calcStats(entityTrades), [entityTrades]);
   const curve = useMemo(() => equityCurve(entityTrades), [entityTrades]);
+  const longTrades = useMemo(() => entityTrades.filter((t) => t.direction === "Long"), [entityTrades]);
+  const shortTrades = useMemo(() => entityTrades.filter((t) => t.direction === "Short"), [entityTrades]);
+  const longStats = useMemo(() => calcStats(longTrades), [longTrades]);
+  const shortStats = useMemo(() => calcStats(shortTrades), [shortTrades]);
   const accent = isStrategy ? ACCENT_PALETTE[idx >= 0 ? idx % ACCENT_PALETTE.length : 0] : (settings[selected.key]?.accent || "#D9A441");
 
   const goPrev = () => { if (list.length === 0) return; onNavigate(selected.type, list[(idx - 1 + list.length) % list.length]); };
@@ -2473,6 +2518,13 @@ function DetailView({ selected, trades, settings, strategies, onBack, onNavigate
       </div>
 
       <StatGrid stats={stats} />
+
+      {stats.n > 0 && (
+        <div className="fj-panel">
+          <p className="fj-panel-title">Long vs Short</p>
+          <LongShortTable longStats={longStats} shortStats={shortStats} />
+        </div>
+      )}
 
       {stats.n === 0 ? (
         <div className="fj-empty">No trades logged for this {isStrategy ? "strategy" : "market"} yet.</div>
