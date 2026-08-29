@@ -23,6 +23,107 @@ const ACCOUNTS_KEY = "futures_journal_accounts_v1";
 
 const uid = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
+// ---------- Tradovate CSV import ----------
+//
+// Tradovate's "Performance" export is a round-turn report — one row per
+// closed position, not one row per fill — with a totally different shape
+// than our own export: no strategy/account info at all, contract symbols
+// with the month code baked in (NQU6 = NQ, September), and P&L in
+// accounting format ($(1,190.00) for negative).
+
+const TRADOVATE_REQUIRED_HEADERS = ["symbol", "buyFillId", "sellFillId", "qty", "buyPrice", "sellPrice", "pnl", "boughtTimestamp", "soldTimestamp"];
+
+// Futures month codes: F=Jan G=Feb H=Mar J=Apr K=May M=Jun N=Jul Q=Aug U=Sep V=Oct X=Nov Z=Dec
+function parseTradovateSymbolRoot(symbol) {
+  const m = /^([A-Z]+?)([FGHJKMNQUVXZ]\d{1,2})$/.exec((symbol || "").trim());
+  return m ? m[1] : (symbol || "").trim();
+}
+
+// "08/28/2026 08:42:00" -> { date: "2026-08-28", time: "08:42", ms: <epoch> }
+function parseTradovateTimestamp(str) {
+  const m = /^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2}):(\d{2})$/.exec((str || "").trim());
+  if (!m) return null;
+  const [, mo, day, yr, hh, mm, ss] = m;
+  const date = `${yr}-${mo}-${day}`;
+  const time = `${hh}:${mm}`;
+  const ms = new Date(`${date}T${hh}:${mm}:${ss}`).getTime();
+  return { date, time, ms };
+}
+
+// "$(1,190.00)" -> -1190, "$520.00" -> 520
+function parseTradovatePnl(str) {
+  const s = (str || "").trim();
+  const negative = s.startsWith("$(") || s.startsWith("(");
+  const num = parseFloat(s.replace(/[$(),]/g, ""));
+  if (Number.isNaN(num)) return null;
+  return negative ? -Math.abs(num) : num;
+}
+
+// Contract specs that are stable exchange facts, not something that changes
+// day to day — safe to state with confidence. Anything not in this list
+// gets a placeholder multiplier of 1 and is flagged for the user to fix.
+const KNOWN_MARKET_DEFAULTS = {
+  NQ: { label: "E-mini Nasdaq-100", multiplier: 20, category: "mini" },
+  ES: { label: "E-mini S&P 500", multiplier: 50, category: "mini" },
+  RTY: { label: "E-mini Russell 2000", multiplier: 50, category: "mini" },
+  YM: { label: "E-mini Dow", multiplier: 5, category: "mini" },
+};
+
+function guessMarketDefaults(root) {
+  if (KNOWN_MARKET_DEFAULTS[root]) return { ...KNOWN_MARKET_DEFAULTS[root], verified: true };
+  const isMicro = root.startsWith("M") && root.length > 1;
+  return { label: root, multiplier: 1, category: isMicro ? "micro" : "mini", verified: false };
+}
+
+function parseTradovateRow(row) {
+  const root = parseTradovateSymbolRoot(row.symbol);
+  const bought = parseTradovateTimestamp(row.boughtTimestamp);
+  const sold = parseTradovateTimestamp(row.soldTimestamp);
+  if (!bought || !sold) return null;
+  const isLong = bought.ms <= sold.ms; // bought first = entered long; sold first = entered short
+  const pnl = parseTradovatePnl(row.pnl);
+  if (pnl === null) return null;
+  // A constant hour-offset shifts both timestamps equally, so which one
+  // came first (and therefore direction and duration) is unaffected — only
+  // the displayed/stored date and time change. That's computed later, once,
+  // from _entryMs + whatever offset is chosen.
+  return {
+    _entryMs: isLong ? bought.ms : sold.ms,
+    durationSec: Math.round(Math.abs(sold.ms - bought.ms) / 1000),
+    market: root,
+    direction: isLong ? "Long" : "Short",
+    contracts: Number(row.qty) || 1,
+    entry: null, // Tradovate's per-fill prices aren't shown in the journal
+    exit: null,
+    fees: 0,
+    pnl,
+    notes: "",
+    strategy: (row.strategy || "").trim(), // only present if the user manually added this column before uploading
+    accounts: [],
+  };
+}
+
+// Applies the hour offset to a raw entry timestamp and returns the
+// date/time as our app stores them. A day can roll over (e.g. 23:40 + 1h
+// = 00:40 the next day) — using a real Date object handles that correctly.
+function tradovateDateTimeAt(entryMs, hourOffset) {
+  const d = new Date(entryMs + hourOffset * 3600000);
+  const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const time = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return { date, time };
+}
+
+function formatDuration(sec) {
+  if (sec === null || sec === undefined || Number.isNaN(sec)) return "—";
+  const s = Math.round(sec);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = s % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${ss}s`;
+  return `${ss}s`;
+}
+
 const DOW_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const DOW_LABELS_SHORT = ["S", "M", "T", "W", "T", "F", "S"];
 const DOW_LABELS_FULL = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
@@ -318,6 +419,8 @@ export default function TradingJournal() {
   const fileInputRef = useRef(null);
   const [restorePreview, setRestorePreview] = useState(null); // { data, tradeCount, accountCount } | { error }
   const backupFileInputRef = useRef(null);
+  const [tradovateImport, setTradovateImport] = useState(null); // { parsedRows, newMarkets } | { error }
+  const tradovateFileInputRef = useRef(null);
 
   useEffect(() => {
     (async () => {
@@ -344,7 +447,7 @@ export default function TradingJournal() {
 
   const handleSave = (trade) => {
     setTrades((prev) => {
-      if (editingId) return prev.map((t) => (t.id === editingId ? { ...trade, id: editingId } : t));
+      if (editingId) return prev.map((t) => (t.id === editingId ? { ...t, ...trade, id: editingId } : t));
       return [...prev, { ...trade, id: uid() }];
     });
     setShowForm(false);
@@ -441,6 +544,66 @@ export default function TradingJournal() {
     if (mode === "append") setTrades((prev) => [...prev, ...importPreview.parsed]);
     if (mode === "replace") { setTrades(importPreview.parsed); setSelectedEntity(null); setView("home"); }
     setImportPreview(null);
+  };
+
+  const triggerTradovateImport = () => tradovateFileInputRef.current?.click();
+
+  const handleTradovateFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        const headerRow = results.meta.fields || [];
+        const looksLikeTradovate = TRADOVATE_REQUIRED_HEADERS.every((h) => headerRow.includes(h));
+        if (!looksLikeTradovate) {
+          setTradovateImport({ error: "This doesn't look like a Tradovate Performance export — expected columns like buyFillId, sellFillId, boughtTimestamp, soldTimestamp weren't found." });
+          return;
+        }
+        const parsedRows = [];
+        let errorCount = 0;
+        results.data.forEach((row) => {
+          const parsed = parseTradovateRow(row);
+          if (parsed) parsedRows.push(parsed);
+          else errorCount++;
+        });
+        if (parsedRows.length === 0) {
+          setTradovateImport({ error: `Couldn't parse any rows from this file${errorCount ? ` (${errorCount} row${errorCount === 1 ? "" : "s"} failed)` : ""}.` });
+          return;
+        }
+        const existingSymbols = new Set(Object.keys(settings));
+        const newSymbols = Array.from(new Set(parsedRows.map((r) => r.market).filter((s) => !existingSymbols.has(s))));
+        const newMarkets = newSymbols.map((symbol) => ({ symbol, ...guessMarketDefaults(symbol) }));
+        setTradovateImport({ parsedRows, newMarkets });
+      },
+    });
+    e.target.value = "";
+  };
+
+  const confirmTradovateImport = (finalRows) => {
+    if (!tradovateImport || tradovateImport.error) return;
+    const newTrades = finalRows.map((r) => ({
+      id: uid(),
+      date: r.date, time: r.time, market: r.market, strategy: r.strategy,
+      accounts: r.accounts, direction: r.direction, contracts: r.contracts,
+      entry: r.entry, exit: r.exit, fees: r.fees, pnl: r.pnl, notes: r.notes,
+      durationSec: r.durationSec,
+    }));
+    setTrades((prev) => [...prev, ...newTrades]);
+    if (tradovateImport.newMarkets.length > 0) {
+      setSettings((prev) => {
+        const next = { ...prev };
+        tradovateImport.newMarkets.forEach((m) => {
+          if (!next[m.symbol]) {
+            const accent = ACCENT_PALETTE[Object.keys(next).length % ACCENT_PALETTE.length];
+            next[m.symbol] = { label: m.label, multiplier: m.multiplier, accent, category: m.category };
+          }
+        });
+        return next;
+      });
+    }
+    setTradovateImport(null);
   };
 
   const handleBackup = () => {
@@ -697,6 +860,7 @@ export default function TradingJournal() {
         onSettings={() => setShowSettings((s) => !s)}
         onExport={handleExport}
         onImportClick={triggerImport}
+        onTradovateImportClick={triggerTradovateImport}
         onBackup={handleBackup}
         onRestoreClick={triggerRestore}
       />
@@ -707,6 +871,14 @@ export default function TradingJournal() {
         accept=".csv,text/csv"
         style={{ display: "none" }}
         onChange={handleFileChange}
+      />
+
+      <input
+        ref={tradovateFileInputRef}
+        type="file"
+        accept=".csv,text/csv"
+        style={{ display: "none" }}
+        onChange={handleTradovateFileChange}
       />
 
       <input
@@ -725,6 +897,32 @@ export default function TradingJournal() {
           onReplace={() => confirmImport("replace")}
           onCancel={() => setImportPreview(null)}
         />
+      )}
+
+      {tradovateImport && !tradovateImport.error && (
+        <TradovateImportModal
+          parsedRows={tradovateImport.parsedRows}
+          newMarkets={tradovateImport.newMarkets}
+          strategies={strategies}
+          accounts={accounts}
+          onConfirm={confirmTradovateImport}
+          onCancel={() => setTradovateImport(null)}
+        />
+      )}
+
+      {tradovateImport && tradovateImport.error && (
+        <div className="fj-modal-backdrop" onClick={() => setTradovateImport(null)}>
+          <div className="fj-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <p className="fj-panel-title" style={{ margin: 0 }}>Couldn't import this file</p>
+              <button className="fj-iconbtn" onClick={() => setTradovateImport(null)}><X size={18} /></button>
+            </div>
+            <div className="fj-loss" style={{ fontSize: 13, marginBottom: 16 }}>{tradovateImport.error}</div>
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button className="fj-btn" onClick={() => setTradovateImport(null)}>Close</button>
+            </div>
+          </div>
+        </div>
       )}
 
       {restorePreview && (
@@ -803,7 +1001,7 @@ export default function TradingJournal() {
 
 // ---------- header ----------
 
-function Header({ onAdd, onSettings, onExport, onImportClick, onBackup, onRestoreClick }) {
+function Header({ onAdd, onSettings, onExport, onImportClick, onTradovateImportClick, onBackup, onRestoreClick }) {
   return (
     <div className="fj-header">
       <div>
@@ -813,6 +1011,7 @@ function Header({ onAdd, onSettings, onExport, onImportClick, onBackup, onRestor
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <button className="fj-btn" onClick={onSettings}><Settings2 size={14} /> Contract settings</button>
         <button className="fj-btn" onClick={onImportClick}><Upload size={14} /> Import CSV</button>
+        <button className="fj-btn" onClick={onTradovateImportClick} title="Import a Tradovate Performance export and tag each trade before saving"><Upload size={14} /> Import Tradovate CSV</button>
         <button className="fj-btn" onClick={onExport}><Download size={14} /> Export CSV</button>
         <button className="fj-btn" onClick={onRestoreClick} title="Restore trades, accounts, and settings from a backup file"><Upload size={14} /> Restore backup</button>
         <button className="fj-btn" onClick={onBackup} title="Download everything — trades, accounts, settings — as one file"><Download size={14} /> Backup all data</button>
@@ -857,6 +1056,161 @@ function ImportPreviewModal({ preview, existingCount, onAppend, onReplace, onCan
               <button className="fj-btn primary" onClick={onAppend}>Append to existing</button>
             </>
           )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TradovateImportModal({ parsedRows, newMarkets, strategies, accounts, onConfirm, onCancel }) {
+  const [rows, setRows] = useState(() => parsedRows.map((r) => ({ ...r, _id: uid() })));
+  const [selected, setSelected] = useState(() => new Set(rows.map((r) => r._id)));
+  const [bulkStrategy, setBulkStrategy] = useState("");
+  const [bulkAccounts, setBulkAccounts] = useState([]);
+  const [hourOffset, setHourOffset] = useState(1);
+
+  const allSelected = selected.size > 0 && selected.size === rows.length;
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(rows.map((r) => r._id)));
+  const toggleOne = (id) => setSelected((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  const updateRow = (id, patch) => setRows((prev) => prev.map((r) => r._id === id ? { ...r, ...patch } : r));
+  const toggleRowAccount = (id, name) => setRows((prev) => prev.map((r) => {
+    if (r._id !== id) return r;
+    const has = r.accounts.includes(name);
+    return { ...r, accounts: has ? r.accounts.filter((a) => a !== name) : [...r.accounts, name] };
+  }));
+  const toggleBulkAccount = (name) => setBulkAccounts((prev) => prev.includes(name) ? prev.filter((a) => a !== name) : [...prev, name]);
+
+  const applyBulk = () => {
+    if (selected.size === 0) return;
+    setRows((prev) => prev.map((r) => selected.has(r._id)
+      ? { ...r, strategy: bulkStrategy.trim() || r.strategy, accounts: bulkAccounts.length ? bulkAccounts : r.accounts }
+      : r
+    ));
+  };
+
+  // Date/time are derived from the raw timestamp + offset at render time
+  // (not stored), so adjusting the offset updates every row immediately.
+  const rowsWithTime = useMemo(
+    () => rows.map((r) => ({ ...r, ...tradovateDateTimeAt(r._entryMs, hourOffset) })),
+    [rows, hourOffset]
+  );
+
+  const untaggedCount = rows.filter((r) => !r.strategy).length;
+  const totalPnl = rows.reduce((s, r) => s + r.pnl, 0);
+  const selectedPnl = rows.filter((r) => selected.has(r._id)).reduce((s, r) => s + r.pnl, 0);
+
+  return (
+    <div className="fj-modal-backdrop" onClick={onCancel}>
+      <div className="fj-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 940 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div>
+            <p className="fj-panel-title" style={{ margin: 0 }}>Tag Tradovate trades before importing</p>
+            <div className="fj-sub" style={{ marginTop: 3 }}>
+              {rows.length} trade{rows.length === 1 ? "" : "s"} parsed · net {money(totalPnl)} · <b style={{ color: "#E7E5E0" }}>{selected.size} selected</b> for import (net {money(selectedPnl)}){untaggedCount > 0 ? ` · ${untaggedCount} still untagged` : ""}
+            </div>
+          </div>
+          <button className="fj-iconbtn" onClick={onCancel}><X size={18} /></button>
+        </div>
+
+        {newMarkets.length > 0 && (
+          <div className="fj-sub" style={{ marginBottom: 12, padding: "8px 10px", background: "var(--panel-alt)", borderRadius: 8, border: "1px solid var(--border)" }}>
+            New market{newMarkets.length === 1 ? "" : "s"} detected: <b style={{ color: "#E7E5E0" }}>{newMarkets.map((m) => m.symbol).join(", ")}</b> — added to Contract Settings automatically.
+            {newMarkets.some((m) => !m.verified) && " Double-check the $/point value for any unfamiliar symbol — I only pre-filled it confidently for a few common contracts."}
+          </div>
+        )}
+
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 12, padding: "8px 10px", background: "var(--panel-alt)", borderRadius: 8, border: "1px solid var(--border)" }}>
+          <label className="fj-sub" style={{ margin: 0, whiteSpace: "nowrap" }}>Hour offset (Tradovate time → your real time):</label>
+          <input
+            type="number" step="1" className="fj-input" style={{ width: 70 }}
+            value={hourOffset} onChange={(e) => setHourOffset(Number(e.target.value) || 0)}
+          />
+          <span className="fj-sub" style={{ margin: 0 }}>
+            {hourOffset === 0 ? "No adjustment" : `Every trade's date/time below is shown ${hourOffset > 0 ? "+" : ""}${hourOffset}h from what Tradovate exported.`}
+          </span>
+        </div>
+
+        <div className="fj-sub" style={{ marginBottom: 8 }}>
+          Select trades below, then set a strategy and/or accounts to apply to all of them at once — much faster than tagging one at a time.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14, padding: "10px 12px", background: "var(--panel-alt)", borderRadius: 10, border: "1px solid var(--border)" }}>
+          <input
+            className="fj-input" style={{ fontFamily: "Inter, sans-serif", width: 200 }}
+            list="tradovate-strategy-list" placeholder="Strategy for selected…"
+            value={bulkStrategy} onChange={(e) => setBulkStrategy(e.target.value)}
+          />
+          <datalist id="tradovate-strategy-list">
+            {strategies.map((s) => <option key={s} value={s} />)}
+          </datalist>
+          {accounts.map((a) => (
+            <span key={a.id} className={`fj-chip ${bulkAccounts.includes(a.name) ? "active" : ""}`} onClick={() => toggleBulkAccount(a.name)}>
+              {a.name}
+            </span>
+          ))}
+          <button type="button" className="fj-btn primary" style={{ marginLeft: "auto" }} disabled={selected.size === 0} onClick={applyBulk}>
+            Apply to {selected.size} selected
+          </button>
+        </div>
+
+        <div style={{ overflowX: "auto", maxHeight: "45vh", overflowY: "auto", border: "1px solid var(--border)", borderRadius: 10 }}>
+          <table className="fj-table">
+            <thead>
+              <tr>
+                <th><input type="checkbox" checked={allSelected} onChange={toggleAll} /></th>
+                <th>Date</th><th>Time</th><th>Mkt</th><th>Dir</th><th>Qty</th><th>P&amp;L</th><th>Dur.</th>
+                <th>Strategy</th><th>Accounts</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rowsWithTime.map((r) => (
+                <tr key={r._id}>
+                  <td><input type="checkbox" checked={selected.has(r._id)} onChange={() => toggleOne(r._id)} /></td>
+                  <td>{r.date}</td>
+                  <td>{r.time}</td>
+                  <td>{r.market}</td>
+                  <td className={r.direction === "Short" ? "fj-loss" : "fj-profit"}>{r.direction}</td>
+                  <td>{r.contracts}</td>
+                  <td className={r.pnl >= 0 ? "fj-profit" : "fj-loss"}>{money(r.pnl)}</td>
+                  <td>{formatDuration(r.durationSec)}</td>
+                  <td>
+                    <input
+                      className="fj-input" style={{ fontFamily: "Inter, sans-serif", width: 150, fontSize: 12 }}
+                      list="tradovate-strategy-list" placeholder="—"
+                      value={r.strategy} onChange={(e) => updateRow(r._id, { strategy: e.target.value })}
+                    />
+                  </td>
+                  <td>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 3, maxWidth: 160 }}>
+                      {accounts.length === 0 && <span className="fj-sub">—</span>}
+                      {accounts.map((a) => (
+                        <span
+                          key={a.id} className="fj-chip" style={{ fontSize: 10, padding: "2px 7px", ...(r.accounts.includes(a.name) ? { background: "var(--amber)", borderColor: "var(--amber)", color: "#1B1E24", fontWeight: 600 } : {}) }}
+                          onClick={() => toggleRowAccount(r._id, a.name)}
+                        >
+                          {a.name}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 14 }}>
+          <button className="fj-btn" onClick={onCancel}>Cancel</button>
+          <button
+            className="fj-btn primary" disabled={selected.size === 0}
+            onClick={() => onConfirm(rowsWithTime.filter((r) => selected.has(r._id)))}
+          >
+            Import {selected.size} trade{selected.size === 1 ? "" : "s"}
+          </button>
         </div>
       </div>
     </div>
@@ -2087,7 +2441,7 @@ function TradeLog({ trades, onEdit, onDelete }) {
         <thead>
           <tr>
             <th>Date</th><th>Time</th><th>Market</th><th>Strategy</th><th>Accounts</th><th>Dir</th><th>Qty</th>
-            <th>Entry</th><th>Exit</th><th>P&amp;L</th><th style={{ fontFamily: "Inter" }}>Notes</th><th></th>
+            <th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Dur.</th><th style={{ fontFamily: "Inter" }}>Notes</th><th></th>
           </tr>
         </thead>
         <tbody>
@@ -2103,6 +2457,7 @@ function TradeLog({ trades, onEdit, onDelete }) {
               <td>{t.entry || "—"}</td>
               <td>{t.exit || "—"}</td>
               <td className={t.pnl >= 0 ? "fj-profit" : "fj-loss"}>{money(t.pnl)}</td>
+              <td style={{ color: "#8B929E" }}>{formatDuration(t.durationSec)}</td>
               <td style={{ fontFamily: "Inter, sans-serif", color: "#8B929E", maxWidth: 180, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.notes || ""}</td>
               <td className="actions">
                 <button className="fj-iconbtn" onClick={() => onEdit(t)}><Pencil size={14} /></button>
