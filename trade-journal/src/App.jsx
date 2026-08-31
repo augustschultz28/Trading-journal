@@ -331,13 +331,25 @@ function flattenTrades(trades, sizeMultiplier = 1) {
 
 // ---------- martingale depth sweep ----------
 //
-// Rather than asserting one "ideal" martingale cap, this lays out the
-// tradeoff at each depth so the person can pick where they're comfortable:
-// standard 2x-doubling sizes (base, 2x, 4x, 8x...), the dollar cost of a
-// full losing streak reaching that depth, how likely that streak is within
-// a chosen trade window (exact, via the same DP as the streak panel), and
-// whether that cost fits inside a stated buffer.
-function computeMartingaleDepthSweep(trades, { baseContracts = 1, buffer, numTrades = 100, maxDepth = 6 } = {}) {
+// Models a real capped martingale: sizing doubles (base, 2x, 4x...) up to
+// a stated cap depth, and any further losses in the SAME streak stay flat
+// at that cap rather than continuing to double forever. That's how a real
+// "caps at 4 contracts" rule behaves — earlier versions of this assumed
+// unlimited doubling, which overstated cost for streaks longer than the
+// cap and doesn't match a strategy that's actually capped.
+//
+// Rows are indexed by streak length (how many losses in a row — the same
+// thing "Longest loss streak" on the stat grid measures), not by doubling
+// depth, since those aren't the same axis once a cap is in play.
+function costOfCappedStreak(avgLossPerContract, baseContracts, streakLen, capDepth) {
+  let units = 0;
+  for (let i = 1; i <= streakLen; i++) {
+    units += Math.min(Math.pow(2, i - 1), Math.pow(2, capDepth - 1));
+  }
+  return avgLossPerContract * baseContracts * units;
+}
+
+function computeMartingaleDepthSweep(trades, { baseContracts = 1, capDepth = 3, buffer, numTrades = 100, maxStreak = 8 } = {}) {
   if (!trades || trades.length === 0) return null;
   const flat = flattenTrades(trades, 1);
   const n = flat.length;
@@ -346,16 +358,16 @@ function computeMartingaleDepthSweep(trades, { baseContracts = 1, buffer, numTra
   const avgLossPerContract = losses.length ? Math.abs(losses.reduce((a, b) => a + b.pnl, 0) / losses.length) : 0;
 
   const rows = [];
-  for (let depth = 1; depth <= maxDepth; depth++) {
-    const maxContracts = baseContracts * Math.pow(2, depth - 1);
-    const streakCost = avgLossPerContract * baseContracts * (Math.pow(2, depth) - 1);
-    const probability = streakProbability(lossRate, depth, numTrades);
+  for (let streakLen = 1; streakLen <= maxStreak; streakLen++) {
+    const contractsAtEnd = baseContracts * Math.min(Math.pow(2, streakLen - 1), Math.pow(2, capDepth - 1));
+    const streakCost = costOfCappedStreak(avgLossPerContract, baseContracts, streakLen, capDepth);
+    const probability = streakProbability(lossRate, streakLen, numTrades);
     rows.push({
-      depth, maxContracts, streakCost, probability,
+      streakLen, contractsAtEnd, streakCost, probability,
       fitsBuffer: buffer ? streakCost <= buffer : null,
     });
   }
-  return { n, lossRate, avgLossPerContract, baseContracts, numTrades, buffer, rows };
+  return { n, lossRate, avgLossPerContract, baseContracts, capDepth, numTrades, buffer, rows };
 }
 
 // ---------- stats ----------
@@ -1626,6 +1638,7 @@ function OptimizerView({ trades, strategies, accounts }) {
   const [selectedStrategy, setSelectedStrategy] = useState(strategies[0] || "");
   const [buffer, setBuffer] = useState(2000);
   const [baseContracts, setBaseContracts] = useState(1);
+  const [capDepth, setCapDepth] = useState(3);
   const [numTrades, setNumTrades] = useState(100);
   const [accountPick, setAccountPick] = useState("");
 
@@ -1636,6 +1649,7 @@ function OptimizerView({ trades, strategies, accounts }) {
 
   const bufferNum = Math.max(Number(buffer) || 0, 0);
   const baseNum = Math.max(Number(baseContracts) || 1, 1);
+  const capDepthNum = Math.max(Number(capDepth) || 1, 1);
   const tradesAheadNum = Math.max(Number(numTrades) || 1, 1);
 
   const actualStats = useMemo(() => calcStats(entityTrades), [entityTrades]);
@@ -1643,8 +1657,8 @@ function OptimizerView({ trades, strategies, accounts }) {
   const flatStats = useMemo(() => calcStats(flatAtBase), [flatAtBase]);
 
   const depthSweep = useMemo(
-    () => computeMartingaleDepthSweep(entityTrades, { baseContracts: baseNum, buffer: bufferNum, numTrades: tradesAheadNum }),
-    [entityTrades, baseNum, bufferNum, tradesAheadNum]
+    () => computeMartingaleDepthSweep(entityTrades, { baseContracts: baseNum, capDepth: capDepthNum, buffer: bufferNum, numTrades: tradesAheadNum }),
+    [entityTrades, baseNum, capDepthNum, bufferNum, tradesAheadNum]
   );
 
   const ror = useMemo(
@@ -1697,10 +1711,14 @@ function OptimizerView({ trades, strategies, accounts }) {
           </div>
         )}
 
-        <div className="fj-form-row" style={{ gridTemplateColumns: "1fr 1fr" }}>
+        <div className="fj-form-row" style={{ gridTemplateColumns: "1fr 1fr 1fr" }}>
           <div className="fj-form-field">
             <label>Base contract size (flat, before any martingale)</label>
             <input type="number" step="1" className="fj-input" value={baseContracts} onChange={(e) => setBaseContracts(e.target.value)} />
+          </div>
+          <div className="fj-form-field">
+            <label>Max martingale depth (cap)</label>
+            <input type="number" step="1" className="fj-input" value={capDepth} onChange={(e) => setCapDepth(e.target.value)} />
           </div>
           <div className="fj-form-field">
             <label>Trades ahead (shared by every projection below)</label>
@@ -1749,20 +1767,20 @@ function OptimizerView({ trades, strategies, accounts }) {
           </div>
 
           <div className="fj-panel">
-            <p className="fj-panel-title">Martingale depth sweep</p>
+            <p className="fj-panel-title">Loss streak cost sweep</p>
             <div className="fj-sub" style={{ marginBottom: 12 }}>
-              Standard 2x-doubling sizes from your stated base. "Fits buffer" checks whether a full losing streak reaching that depth would stay inside the buffer you set above.
+              Sizing doubles up to your stated cap (depth {capDepthNum} = max {baseNum * Math.pow(2, capDepthNum - 1)} contract{baseNum * Math.pow(2, capDepthNum - 1) === 1 ? "" : "s"}), then stays flat at that cap for any further losses in the same streak — this is what a real "caps at N contracts" rule actually costs, not unlimited doubling. "Fits buffer" checks whether that streak's total cost stays inside the buffer you set above.
             </div>
             <div style={{ overflowX: "auto" }}>
               <table className="fj-table">
                 <thead>
-                  <tr><th>Depth</th><th>Contracts at depth</th><th>Cost of full streak</th><th>Probability within {tradesAheadNum} trades</th><th>Fits buffer?</th></tr>
+                  <tr><th>Losses in a row</th><th>Contracts on final loss</th><th>Cost of full streak</th><th>Probability within {tradesAheadNum} trades</th><th>Fits buffer?</th></tr>
                 </thead>
                 <tbody>
                   {depthSweep.rows.map((r) => (
-                    <tr key={r.depth}>
-                      <td>{r.depth}</td>
-                      <td>{r.maxContracts}</td>
+                    <tr key={r.streakLen}>
+                      <td>{r.streakLen}</td>
+                      <td>{r.contractsAtEnd}</td>
                       <td className="fj-loss">{money(-r.streakCost)}</td>
                       <td className={r.probability >= 0.5 ? "fj-loss" : ""}>{(r.probability * 100).toFixed(1)}%</td>
                       <td className={r.fitsBuffer ? "fj-profit" : "fj-loss"}>{r.fitsBuffer ? "Yes" : "No"}</td>
@@ -1772,7 +1790,7 @@ function OptimizerView({ trades, strategies, accounts }) {
               </table>
             </div>
             <div className="fj-sub" style={{ marginTop: 10, fontSize: 11 }}>
-              Based on {depthSweep.n} trade{depthSweep.n === 1 ? "" : "s"}, loss rate {pct(depthSweep.lossRate * 100)}, avg loss {money(-depthSweep.avgLossPerContract)}/contract.
+              Based on {depthSweep.n} trade{depthSweep.n === 1 ? "" : "s"}, loss rate {pct(depthSweep.lossRate * 100)}, avg loss {money(-depthSweep.avgLossPerContract)}/contract. Compare this to your actual "Longest loss streak" stat above the equity curve — that's the row that tells you what your worst historical stretch would cost under this cap.
             </div>
           </div>
 
@@ -3358,10 +3376,6 @@ function DetailView({ selected, trades, settings, strategies, onBack, onNavigate
 
       <StatGrid stats={stats} />
 
-      {isStrategy && stats.n > 0 && <DailyLossLimitPanel trades={entityTrades} />}
-      {isStrategy && stats.n > 0 && <RiskOfRuinPanel trades={entityTrades} />}
-      {isStrategy && stats.n > 0 && <ConsecutiveLossPanel trades={entityTrades} />}
-
       {stats.n > 0 && (
         <div className="fj-panel">
           <p className="fj-panel-title">Long vs Short</p>
@@ -3397,6 +3411,10 @@ function DetailView({ selected, trades, settings, strategies, onBack, onNavigate
             <p className="fj-panel-title">Stats by time window</p>
             <WindowStatsPanel trades={entityTrades} />
           </div>
+
+          {isStrategy && <DailyLossLimitPanel trades={entityTrades} />}
+          {isStrategy && <RiskOfRuinPanel trades={entityTrades} />}
+          {isStrategy && <ConsecutiveLossPanel trades={entityTrades} />}
 
           <div className="fj-panel">
             <p className="fj-panel-title">Trade log</p>
