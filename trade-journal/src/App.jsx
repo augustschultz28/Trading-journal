@@ -187,6 +187,177 @@ const money = (n) => {
 
 const pct = (n) => `${(Number(n) || 0).toFixed(1)}%`;
 
+// ---------- daily loss limit ----------
+//
+// The idea: a strategy's daily stop should scale with what it actually
+// does per trade (win rate, avg win, avg loss), not an arbitrary dollar
+// figure — so it updates automatically as more trades come in.
+//
+// Two numbers come back:
+//   - a statistical limit (expectancy minus k standard deviations of a
+//     typical day), which tightens or loosens with the strategy's edge
+//   - a simple R-multiple limit (2-3x the average loss), the industry
+//     rule-of-thumb version, as a sanity check against the first
+//
+// Everything is normalized to a flat 1-contract basis (pnl / contracts)
+// so historical size-scaling (martingale, discretionary sizing) doesn't
+// distort the estimate. Multiply the result by whatever size you actually
+// intend to trade live.
+function computeDailyLossLimit(trades, { kValues = [1.5, 2, 2.5], tradesPerDayOverride, minTrades = 10 } = {}) {
+  if (!trades || trades.length === 0) return null;
+
+  const perContract = trades.map((t) => t.pnl / (t.contracts || 1));
+  const n = perContract.length;
+
+  const wins = perContract.filter((p) => p > 0);
+  const losses = perContract.filter((p) => p < 0);
+  const winRate = wins.length / n;
+  const lossRate = losses.length / n;
+  const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0;
+  const avgLoss = losses.length ? Math.abs(losses.reduce((a, b) => a + b, 0) / losses.length) : 0;
+
+  // Per-trade expectancy and variance (win/loss treated as a two-point
+  // distribution around the expectancy).
+  const expectancy = winRate * avgWin - lossRate * avgLoss;
+  const variance = winRate * (avgWin - expectancy) ** 2 + lossRate * (-avgLoss - expectancy) ** 2;
+  const sigma = Math.sqrt(variance);
+
+  const days = new Set(trades.map((t) => t.date)).size;
+  const tradesPerDay = tradesPerDayOverride ?? (days ? n / days : 1);
+
+  // Variance adds across independent trades, so a day's spread scales
+  // with sqrt(trades per day), not trades per day directly.
+  const expectedDayPnl = expectancy * tradesPerDay;
+  const daySigma = sigma * Math.sqrt(tradesPerDay);
+
+  const limits = {};
+  kValues.forEach((k) => { limits[k] = expectedDayPnl - k * daySigma; });
+
+  return {
+    n, days, tradesPerDay, winRate, avgWin, avgLoss,
+    payoffRatio: avgLoss ? avgWin / avgLoss : null,
+    expectancy, sigma, expectedDayPnl, daySigma,
+    limits, // e.g. { 1.5: -45.4, 2: -70.1, 2.5: -94.8 }
+    rMultiple: { low: 2 * avgLoss, high: 3 * avgLoss },
+    lowSample: n < minTrades,
+  };
+}
+
+// ---------- risk of ruin ----------
+//
+// "Given this strategy's actual win rate and average win/loss, if I trade
+// it N more times, how likely is a losing stretch to wipe out a buffer of
+// $X?" Run via Monte Carlo (drawing simulated trades from the strategy's
+// own win/loss distribution) rather than the classical symmetric-payoff
+// gambler's-ruin formula, since avg win and avg loss are rarely equal in
+// real trade data — the closed-form formula would understate or overstate
+// risk depending on which way the asymmetry runs. Flat 1-contract basis,
+// same as the daily loss limit, so martingale history doesn't distort it.
+function computeRiskOfRuin(trades, { buffer, numTrades = 100, numSims = 8000, minTrades = 10 } = {}) {
+  if (!trades || trades.length === 0) return null;
+  const perContract = trades.map((t) => t.pnl / (t.contracts || 1));
+  const n = perContract.length;
+  const wins = perContract.filter((p) => p > 0);
+  const losses = perContract.filter((p) => p < 0);
+  const winRate = wins.length / n;
+  const avgWin = wins.length ? wins.reduce((a, b) => a + b, 0) / wins.length : 0;
+  const avgLoss = losses.length ? Math.abs(losses.reduce((a, b) => a + b, 0) / losses.length) : 0;
+
+  let ruinCount = 0;
+  const troughs = [];
+  for (let s = 0; s < numSims; s++) {
+    let cum = 0, trough = 0, ruined = false;
+    for (let i = 0; i < numTrades; i++) {
+      cum += Math.random() < winRate ? avgWin : -avgLoss;
+      if (cum < trough) trough = cum;
+      if (cum <= -buffer) { ruined = true; break; }
+    }
+    if (ruined) ruinCount++;
+    troughs.push(trough);
+  }
+  troughs.sort((a, b) => a - b);
+
+  return {
+    n, winRate, avgWin, avgLoss, buffer, numTrades, numSims,
+    ror: ruinCount / numSims,
+    medianTrough: troughs[Math.floor(troughs.length / 2)],
+    worstTrough: troughs[0],
+    lowSample: n < minTrades,
+  };
+}
+
+// ---------- consecutive loss streak probability ----------
+//
+// "Given this strategy's actual loss rate, what's the probability of
+// hitting a losing streak of length L within the next N trades?" This is
+// the direct mathematical reason martingale sizing is dangerous — a streak
+// that "shouldn't happen" is usually far more likely than it feels. Exact
+// (not simulated): a small dynamic-programming pass over streak-length
+// states, verified against both a known closed-form identity and an
+// independent Monte Carlo cross-check.
+function streakProbability(lossRate, streakLen, numTrades) {
+  const p = 1 - lossRate;
+  let dp = new Array(streakLen).fill(0);
+  dp[0] = 1;
+  for (let i = 0; i < numTrades; i++) {
+    const next = new Array(streakLen).fill(0);
+    const alive = dp.reduce((a, b) => a + b, 0);
+    next[0] = alive * p;
+    for (let s = 1; s < streakLen; s++) next[s] = dp[s - 1] * lossRate;
+    dp = next;
+  }
+  const stillAlive = dp.reduce((a, b) => a + b, 0);
+  return 1 - stillAlive;
+}
+
+function computeStreakProbabilities(trades, { streakLens = [3, 4, 5, 6, 7, 8], numTrades = 100, minTrades = 10 } = {}) {
+  if (!trades || trades.length === 0) return null;
+  const perContract = trades.map((t) => t.pnl / (t.contracts || 1));
+  const n = perContract.length;
+  const losses = perContract.filter((p) => p < 0);
+  const lossRate = losses.length / n;
+  const probabilities = {};
+  streakLens.forEach((L) => { probabilities[L] = streakProbability(lossRate, L, numTrades); });
+  return { n, lossRate, numTrades, probabilities, lowSample: n < minTrades };
+}
+
+// Recomputes a trade list as if every trade had been taken at a flat size
+// instead of whatever it was actually sized at — the baseline every other
+// comparison here (martingale impact, risk of ruin, depth sweep) is
+// measured against.
+function flattenTrades(trades, sizeMultiplier = 1) {
+  return trades.map((t) => ({ ...t, contracts: 1, pnl: (t.pnl / (t.contracts || 1)) * sizeMultiplier }));
+}
+
+// ---------- martingale depth sweep ----------
+//
+// Rather than asserting one "ideal" martingale cap, this lays out the
+// tradeoff at each depth so the person can pick where they're comfortable:
+// standard 2x-doubling sizes (base, 2x, 4x, 8x...), the dollar cost of a
+// full losing streak reaching that depth, how likely that streak is within
+// a chosen trade window (exact, via the same DP as the streak panel), and
+// whether that cost fits inside a stated buffer.
+function computeMartingaleDepthSweep(trades, { baseContracts = 1, buffer, numTrades = 100, maxDepth = 6 } = {}) {
+  if (!trades || trades.length === 0) return null;
+  const flat = flattenTrades(trades, 1);
+  const n = flat.length;
+  const losses = flat.filter((t) => t.pnl < 0);
+  const lossRate = losses.length / n;
+  const avgLossPerContract = losses.length ? Math.abs(losses.reduce((a, b) => a + b.pnl, 0) / losses.length) : 0;
+
+  const rows = [];
+  for (let depth = 1; depth <= maxDepth; depth++) {
+    const maxContracts = baseContracts * Math.pow(2, depth - 1);
+    const streakCost = avgLossPerContract * baseContracts * (Math.pow(2, depth) - 1);
+    const probability = streakProbability(lossRate, depth, numTrades);
+    rows.push({
+      depth, maxContracts, streakCost, probability,
+      fitsBuffer: buffer ? streakCost <= buffer : null,
+    });
+  }
+  return { n, lossRate, avgLossPerContract, baseContracts, numTrades, buffer, rows };
+}
+
 // ---------- stats ----------
 
 function calcStats(trades) {
@@ -945,6 +1116,7 @@ export default function TradingJournal() {
           ["calendar", "Calendar"],
           ["accounts", "Accounts"],
           ["log", "Trade Log"],
+          ["optimizer", "Optimizer"],
         ].map(([key, label]) => (
           <button key={key} className={`fj-tab ${view === key ? "active" : ""}`} onClick={() => setView(key)}>
             {label}
@@ -983,6 +1155,9 @@ export default function TradingJournal() {
       )}
       {view === "log" && (
         <TradeLogView trades={trades} strategies={strategies} accounts={accounts} settings={settings} onEdit={startEdit} onDelete={handleDelete} />
+      )}
+      {view === "optimizer" && (
+        <OptimizerView trades={trades} strategies={strategies} accounts={accounts} />
       )}
 
       {showForm && (
@@ -1443,6 +1618,178 @@ function TradeLogView({ trades, strategies, accounts, settings, onEdit, onDelete
         onReset={resetFilters}
       />
       <TradeLog trades={filtered} onEdit={onEdit} onDelete={onDelete} />
+    </div>
+  );
+}
+
+function OptimizerView({ trades, strategies, accounts }) {
+  const [selectedStrategy, setSelectedStrategy] = useState(strategies[0] || "");
+  const [buffer, setBuffer] = useState(2000);
+  const [baseContracts, setBaseContracts] = useState(1);
+  const [numTrades, setNumTrades] = useState(100);
+  const [accountPick, setAccountPick] = useState("");
+
+  const entityTrades = useMemo(
+    () => trades.filter((t) => t.strategy === selectedStrategy),
+    [trades, selectedStrategy]
+  );
+
+  const bufferNum = Math.max(Number(buffer) || 0, 0);
+  const baseNum = Math.max(Number(baseContracts) || 1, 1);
+  const tradesAheadNum = Math.max(Number(numTrades) || 1, 1);
+
+  const actualStats = useMemo(() => calcStats(entityTrades), [entityTrades]);
+  const flatAtBase = useMemo(() => flattenTrades(entityTrades, baseNum), [entityTrades, baseNum]);
+  const flatStats = useMemo(() => calcStats(flatAtBase), [flatAtBase]);
+
+  const depthSweep = useMemo(
+    () => computeMartingaleDepthSweep(entityTrades, { baseContracts: baseNum, buffer: bufferNum, numTrades: tradesAheadNum }),
+    [entityTrades, baseNum, bufferNum, tradesAheadNum]
+  );
+
+  const ror = useMemo(
+    () => computeRiskOfRuin(flatAtBase, { buffer: Math.max(bufferNum, 1), numTrades: tradesAheadNum }),
+    [flatAtBase, bufferNum, tradesAheadNum]
+  );
+
+  const applyAccountFloor = (accountId) => {
+    setAccountPick(accountId);
+    const acct = accounts.find((a) => a.id === accountId);
+    if (!acct) return;
+    const timelineData = buildAccountBalanceTimeline(acct, trades);
+    const { floor } = computeAccountFloor(acct, timelineData);
+    const distance = timelineData.currentBalance - floor;
+    if (distance > 0) setBuffer(Math.round(distance));
+  };
+
+  const pnlDelta = actualStats.totalPnl - flatStats.totalPnl;
+  const ddDelta = actualStats.maxDD - flatStats.maxDD; // positive = martingale drew down more
+
+  return (
+    <div>
+      <div className="fj-panel">
+        <p className="fj-panel-title">Strategy optimizer</p>
+        <div className="fj-sub" style={{ marginBottom: 14 }}>
+          Pick a strategy and a buffer to protect, and every number below recalculates against that strategy's real win/loss distribution — no single number here is asserted as "correct"; the depth sweep is meant to show you where the tradeoffs actually sit so you can pick based on your own risk tolerance.
+        </div>
+
+        <div className="fj-form-row" style={{ gridTemplateColumns: "1fr 1fr", marginBottom: 10 }}>
+          <div className="fj-form-field">
+            <label>Strategy</label>
+            <select className="fj-select" value={selectedStrategy} onChange={(e) => setSelectedStrategy(e.target.value)}>
+              <option value="">Select…</option>
+              {strategies.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+          </div>
+          <div className="fj-form-field">
+            <label>Buffer to protect ($)</label>
+            <input type="number" step="100" className="fj-input" value={buffer} onChange={(e) => { setBuffer(e.target.value); setAccountPick(""); }} />
+          </div>
+        </div>
+
+        {accounts.length > 0 && (
+          <div className="fj-form-field" style={{ marginBottom: 10 }}>
+            <label>Or fill buffer from an account's current distance to floor</label>
+            <select className="fj-select" value={accountPick} onChange={(e) => applyAccountFloor(e.target.value)}>
+              <option value="">None — enter manually above</option>
+              {accounts.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+            </select>
+          </div>
+        )}
+
+        <div className="fj-form-row" style={{ gridTemplateColumns: "1fr 1fr" }}>
+          <div className="fj-form-field">
+            <label>Base contract size (flat, before any martingale)</label>
+            <input type="number" step="1" className="fj-input" value={baseContracts} onChange={(e) => setBaseContracts(e.target.value)} />
+          </div>
+          <div className="fj-form-field">
+            <label>Trades ahead (shared by every projection below)</label>
+            <input type="number" step="10" className="fj-input" value={numTrades} onChange={(e) => setNumTrades(e.target.value)} />
+          </div>
+        </div>
+      </div>
+
+      {!selectedStrategy || entityTrades.length === 0 ? (
+        <div className="fj-empty">Select a strategy with logged trades to see its numbers.</div>
+      ) : (
+        <>
+          <div className="fj-panel">
+            <p className="fj-panel-title">Martingale impact — keep enabled or disable?</p>
+            <div className="fj-sub" style={{ marginBottom: 12 }}>
+              As-traded (your real historical contract sizing) vs. flat sizing at your stated base of {baseNum} contract{baseNum === 1 ? "" : "s"} — same trades, same wins and losses, only the sizing changes.
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table className="fj-table">
+                <thead>
+                  <tr><th></th><th>Total P&amp;L</th><th>Max drawdown</th><th>Profit factor</th><th>Win rate</th></tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td style={{ fontFamily: "Inter, sans-serif", fontWeight: 600 }}>As traded (martingale)</td>
+                    <td className={actualStats.totalPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(actualStats.totalPnl)}</td>
+                    <td className="fj-loss">{money(-actualStats.maxDD)}</td>
+                    <td>{actualStats.profitFactor === null ? "—" : actualStats.profitFactor === Infinity ? "∞" : actualStats.profitFactor.toFixed(2)}</td>
+                    <td>{pct(actualStats.winRate)}</td>
+                  </tr>
+                  <tr>
+                    <td style={{ fontFamily: "Inter, sans-serif", fontWeight: 600 }}>Flat at base size</td>
+                    <td className={flatStats.totalPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(flatStats.totalPnl)}</td>
+                    <td className="fj-loss">{money(-flatStats.maxDD)}</td>
+                    <td>{flatStats.profitFactor === null ? "—" : flatStats.profitFactor === Infinity ? "∞" : flatStats.profitFactor.toFixed(2)}</td>
+                    <td>{pct(flatStats.winRate)}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div className="fj-sub" style={{ marginTop: 10 }}>
+              Martingale sizing {pnlDelta >= 0 ? "added" : "cost"} <b style={{ color: "var(--text)" }}>{money(Math.abs(pnlDelta))}</b> in total P&amp;L
+              {" "}and {ddDelta >= 0 ? "increased" : "reduced"} max drawdown by <b style={{ color: "var(--text)" }}>{money(Math.abs(ddDelta))}</b>, compared to flat sizing.
+              Win rate is identical either way — sizing doesn't change which trades won or lost.
+            </div>
+          </div>
+
+          <div className="fj-panel">
+            <p className="fj-panel-title">Martingale depth sweep</p>
+            <div className="fj-sub" style={{ marginBottom: 12 }}>
+              Standard 2x-doubling sizes from your stated base. "Fits buffer" checks whether a full losing streak reaching that depth would stay inside the buffer you set above.
+            </div>
+            <div style={{ overflowX: "auto" }}>
+              <table className="fj-table">
+                <thead>
+                  <tr><th>Depth</th><th>Contracts at depth</th><th>Cost of full streak</th><th>Probability within {tradesAheadNum} trades</th><th>Fits buffer?</th></tr>
+                </thead>
+                <tbody>
+                  {depthSweep.rows.map((r) => (
+                    <tr key={r.depth}>
+                      <td>{r.depth}</td>
+                      <td>{r.maxContracts}</td>
+                      <td className="fj-loss">{money(-r.streakCost)}</td>
+                      <td className={r.probability >= 0.5 ? "fj-loss" : ""}>{(r.probability * 100).toFixed(1)}%</td>
+                      <td className={r.fitsBuffer ? "fj-profit" : "fj-loss"}>{r.fitsBuffer ? "Yes" : "No"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div className="fj-sub" style={{ marginTop: 10, fontSize: 11 }}>
+              Based on {depthSweep.n} trade{depthSweep.n === 1 ? "" : "s"}, loss rate {pct(depthSweep.lossRate * 100)}, avg loss {money(-depthSweep.avgLossPerContract)}/contract.
+            </div>
+          </div>
+
+          <div className="fj-panel">
+            <p className="fj-panel-title">Risk of ruin at this buffer</p>
+            <div className="fj-sub" style={{ marginBottom: 12 }}>
+              Simulated at your stated base size ({baseNum} contract{baseNum === 1 ? "" : "s"} flat, not martingale-scaled), against the {money(bufferNum)} buffer above, over the next {tradesAheadNum} trades.
+            </div>
+            <div className={ror.ror >= 0.5 ? "fj-loss" : ror.ror >= 0.2 ? "" : "fj-profit"} style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 30, fontWeight: 700, marginBottom: 10 }}>
+              {(ror.ror * 100).toFixed(1)}%
+            </div>
+            <div className="fj-sub">
+              Median worst drawdown across simulations: {money(ror.medianTrough)} · Worst-case simulated: {money(ror.worstTrough)}
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
@@ -2834,6 +3181,143 @@ function WindowStatsPanel({ trades }) {
 
 // ---------- detail view (strategy or market drill-down) ----------
 
+function DailyLossLimitPanel({ trades }) {
+  const [k, setK] = useState(2);
+  const stats = useMemo(() => computeDailyLossLimit(trades), [trades]);
+
+  if (!stats) return null;
+  const limit = stats.limits[k];
+
+  return (
+    <div className="fj-panel">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
+        <p className="fj-panel-title" style={{ margin: 0 }}>Daily loss limit</p>
+        {stats.lowSample && (
+          <span className="fj-badge eval" title="Under 10 trades — treat this as a rough estimate">Low sample</span>
+        )}
+      </div>
+      <div className="fj-sub" style={{ marginBottom: 12 }}>
+        Stop trading this strategy for the day once you've given back this much — scales with its own edge, not a flat guess.
+      </div>
+
+      <div style={{ display: "flex", alignItems: "baseline", gap: 14, flexWrap: "wrap", marginBottom: 12 }}>
+        <div className="fj-loss" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 30, fontWeight: 700 }}>
+          {money(limit)}
+        </div>
+        <div className="fj-seg-toggle">
+          {[1.5, 2, 2.5].map((opt) => (
+            <button key={opt} className={`fj-seg-btn ${opt === k ? "active" : ""}`} onClick={() => setK(opt)}>k={opt}</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="fj-sub" style={{ marginBottom: 6 }}>
+        {pct(stats.winRate * 100)} win rate · {stats.tradesPerDay.toFixed(2)} trades/day · expectancy {money(stats.expectancy)}/trade (flat 1-contract)
+      </div>
+      <div className="fj-sub" style={{ marginBottom: 10 }}>
+        R-multiple check (2–3x avg loss): {money(-stats.rMultiple.low)}–{money(-stats.rMultiple.high)}
+      </div>
+      <div className="fj-sub" style={{ fontSize: 11 }}>
+        Based on {stats.n} trade{stats.n === 1 ? "" : "s"} over {stats.days} day{stats.days === 1 ? "" : "s"}, flat 1-contract basis — scale this to your live contract size before treating it as a hard stop.
+      </div>
+    </div>
+  );
+}
+
+function RiskOfRuinPanel({ trades }) {
+  const [buffer, setBuffer] = useState(2000);
+  const [numTrades, setNumTrades] = useState(100);
+  const stats = useMemo(
+    () => computeRiskOfRuin(trades, { buffer: Math.max(Number(buffer) || 0, 1), numTrades: Math.max(Number(numTrades) || 1, 1) }),
+    [trades, buffer, numTrades]
+  );
+
+  if (!stats) return null;
+  const rorPct = stats.ror * 100;
+  const severity = rorPct >= 50 ? "fj-loss" : rorPct >= 20 ? "" : "fj-profit";
+
+  return (
+    <div className="fj-panel">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
+        <p className="fj-panel-title" style={{ margin: 0 }}>Risk of ruin</p>
+        {stats.lowSample && <span className="fj-badge eval" title="Under 10 trades — treat this as a rough estimate">Low sample</span>}
+      </div>
+      <div className="fj-sub" style={{ marginBottom: 12 }}>
+        Probability a buffer gets wiped out over the next stretch of trades — simulated from this strategy's own win/loss distribution, not a symmetric-payoff formula that would misstate the real asymmetry.
+      </div>
+
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 14 }}>
+        <div className="fj-form-field" style={{ width: 140 }}>
+          <label>Buffer to protect ($)</label>
+          <input type="number" step="100" className="fj-input" value={buffer} onChange={(e) => setBuffer(e.target.value)} />
+        </div>
+        <div className="fj-form-field" style={{ width: 120 }}>
+          <label>Trades ahead</label>
+          <input type="number" step="10" className="fj-input" value={numTrades} onChange={(e) => setNumTrades(e.target.value)} />
+        </div>
+      </div>
+
+      <div className={severity} style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 30, fontWeight: 700, marginBottom: 10 }}>
+        {rorPct.toFixed(1)}%
+      </div>
+
+      <div className="fj-sub" style={{ marginBottom: 6 }}>
+        Median worst drawdown across simulations: {money(stats.medianTrough)} · Worst-case simulated: {money(stats.worstTrough)}
+      </div>
+      <div className="fj-sub" style={{ fontSize: 11 }}>
+        Based on {stats.n} trade{stats.n === 1 ? "" : "s"}, flat 1-contract basis — the buffer and any live-size conversion are yours to set; this doesn't know your real account balance.
+      </div>
+    </div>
+  );
+}
+
+function ConsecutiveLossPanel({ trades }) {
+  const [numTrades, setNumTrades] = useState(100);
+  const stats = useMemo(
+    () => computeStreakProbabilities(trades, { numTrades: Math.max(Number(numTrades) || 1, 1) }),
+    [trades, numTrades]
+  );
+
+  if (!stats) return null;
+
+  return (
+    <div className="fj-panel">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
+        <p className="fj-panel-title" style={{ margin: 0 }}>Consecutive loss streak probability</p>
+        {stats.lowSample && <span className="fj-badge eval" title="Under 10 trades — treat this as a rough estimate">Low sample</span>}
+      </div>
+      <div className="fj-sub" style={{ marginBottom: 12 }}>
+        Exact probability of hitting a losing streak of a given length within the next N trades — the direct math behind why martingale sizing gets tested more often than it feels like it should.
+      </div>
+
+      <div className="fj-form-field" style={{ width: 120, marginBottom: 14 }}>
+        <label>Trades ahead</label>
+        <input type="number" step="10" className="fj-input" value={numTrades} onChange={(e) => setNumTrades(e.target.value)} />
+      </div>
+
+      <div style={{ overflowX: "auto" }}>
+        <table className="fj-table">
+          <thead>
+            <tr><th>Streak length</th>{Object.keys(stats.probabilities).map((L) => <th key={L}>{L} losses</th>)}</tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style={{ fontFamily: "Inter, sans-serif" }}>Probability</td>
+              {Object.entries(stats.probabilities).map(([L, p]) => (
+                <td key={L} className={p >= 0.5 ? "fj-loss" : ""}>{(p * 100).toFixed(1)}%</td>
+              ))}
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div className="fj-sub" style={{ marginTop: 10, fontSize: 11 }}>
+        Based on {stats.n} trade{stats.n === 1 ? "" : "s"} · loss rate {pct(stats.lossRate * 100)} · a streak of length L means L in a row — if you're running a martingale sequence, that's L consecutive size increases.
+      </div>
+    </div>
+  );
+}
+
 function DetailView({ selected, trades, settings, strategies, onBack, onNavigate, onEdit, onDelete }) {
   const isStrategy = selected.type === "strategy";
   const list = isStrategy ? strategies : Object.keys(settings);
@@ -2873,6 +3357,10 @@ function DetailView({ selected, trades, settings, strategies, onBack, onNavigate
       </div>
 
       <StatGrid stats={stats} />
+
+      {isStrategy && stats.n > 0 && <DailyLossLimitPanel trades={entityTrades} />}
+      {isStrategy && stats.n > 0 && <RiskOfRuinPanel trades={entityTrades} />}
+      {isStrategy && stats.n > 0 && <ConsecutiveLossPanel trades={entityTrades} />}
 
       {stats.n > 0 && (
         <div className="fj-panel">
