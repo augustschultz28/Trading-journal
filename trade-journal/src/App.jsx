@@ -4,7 +4,7 @@ import {
   ResponsiveContainer, BarChart, Bar, ReferenceLine, ScatterChart, Scatter, Cell,
   Area, ComposedChart
 } from "recharts";
-import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, RotateCcw, Settings2, ChevronLeft, ChevronRight, ArrowLeft, Upload, Download } from "lucide-react";
+import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, RotateCcw, Settings2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, ArrowLeft, Upload, Download } from "lucide-react";
 import Papa from "papaparse";
 
 // ---------- constants ----------
@@ -20,8 +20,26 @@ const DEFAULT_SETTINGS = {
 const TRADES_KEY = "futures_journal_trades_v1";
 const SETTINGS_KEY = "futures_journal_settings_v1";
 const ACCOUNTS_KEY = "futures_journal_accounts_v1";
+const NOTES_KEY = "futures_journal_notes_v1";
 
 const uid = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+
+const NOTE_CATEGORIES = [
+  ["general", "General"],
+  ["strategy", "Strategy Change"],
+  ["market", "Market Added/Removed"],
+  ["account", "Account Update"],
+  ["setting", "Setting Change"],
+];
+const NOTE_CATEGORY_LABEL = Object.fromEntries(NOTE_CATEGORIES);
+
+// Notes store `links: [{type, key}, ...]` (multiple strategies/markets/
+// accounts can be tagged on one note).
+function getNoteLinks(note) {
+  if (Array.isArray(note.links)) return note.links;
+  if (note.entityType && note.entityKey) return [{ type: note.entityType, key: note.entityKey }];
+  return [];
+}
 
 // ---------- Tradovate CSV import ----------
 //
@@ -591,8 +609,9 @@ export default function TradingJournal() {
   const [trades, setTrades] = useState([]);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [accounts, setAccounts] = useState([]);
+  const [notes, setNotes] = useState([]);
 
-  const [view, setView] = useState("home"); // home | calendar | accounts | log
+  const [view, setView] = useState("home"); // home | calendar | accounts | log | timeline | optimizer
   const [selectedEntity, setSelectedEntity] = useState(null); // { type: 'strategy'|'market', key } | null
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
@@ -607,14 +626,16 @@ export default function TradingJournal() {
 
   useEffect(() => {
     (async () => {
-      const [t, s, a] = await Promise.all([
+      const [t, s, a, n] = await Promise.all([
         loadJSON(TRADES_KEY, []),
         loadJSON(SETTINGS_KEY, DEFAULT_SETTINGS),
         loadJSON(ACCOUNTS_KEY, []),
+        loadJSON(NOTES_KEY, []),
       ]);
       setTrades(t);
       setSettings({ ...DEFAULT_SETTINGS, ...s });
       setAccounts(a);
+      setNotes(n);
       setReady(true);
     })();
   }, []);
@@ -622,6 +643,7 @@ export default function TradingJournal() {
   useEffect(() => { if (ready) saveJSON(TRADES_KEY, trades); }, [trades, ready]);
   useEffect(() => { if (ready) saveJSON(SETTINGS_KEY, settings); }, [settings, ready]);
   useEffect(() => { if (ready) saveJSON(ACCOUNTS_KEY, accounts); }, [accounts, ready]);
+  useEffect(() => { if (ready) saveJSON(NOTES_KEY, notes); }, [notes, ready]);
 
   const strategies = useMemo(
     () => Array.from(new Set(trades.map((t) => t.strategy).filter(Boolean))).sort(),
@@ -639,6 +661,10 @@ export default function TradingJournal() {
 
   const handleDelete = (id) => setTrades((prev) => prev.filter((t) => t.id !== id));
   const startEdit = (t) => { setEditingId(t.id); setShowForm(true); };
+
+  const addNote = (note) => setNotes((prev) => [...prev, { ...note, id: uid() }]);
+  const updateNote = (id, patch) => setNotes((prev) => prev.map((n) => n.id === id ? { ...n, ...patch } : n));
+  const deleteNote = (id) => setNotes((prev) => prev.filter((n) => n.id !== id));
 
   const handleExport = () => {
     const rows = trades.map((t) => ({
@@ -797,6 +823,7 @@ export default function TradingJournal() {
       trades,
       accounts,
       settings,
+      notes,
     };
     const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -841,6 +868,7 @@ export default function TradingJournal() {
     setTrades(Array.isArray(data.trades) ? data.trades : []);
     setAccounts(Array.isArray(data.accounts) ? data.accounts : []);
     setSettings({ ...DEFAULT_SETTINGS, ...(data.settings || {}) });
+    setNotes(Array.isArray(data.notes) ? data.notes : []);
     setSelectedEntity(null);
     setView("home");
     setRestorePreview(null);
@@ -1128,6 +1156,7 @@ export default function TradingJournal() {
           ["calendar", "Calendar"],
           ["accounts", "Accounts"],
           ["log", "Trade Log"],
+          ["timeline", "Timeline"],
           ["optimizer", "Optimizer"],
         ].map(([key, label]) => (
           <button key={key} className={`fj-tab ${view === key ? "active" : ""}`} onClick={() => setView(key)}>
@@ -1143,6 +1172,11 @@ export default function TradingJournal() {
             trades={trades}
             settings={settings}
             strategies={strategies}
+            notes={notes}
+            accounts={accounts}
+            onAddNote={addNote}
+            onUpdateNote={updateNote}
+            onDeleteNote={deleteNote}
             onBack={() => setSelectedEntity(null)}
             onNavigate={(type, key) => setSelectedEntity({ type, key })}
             onEdit={startEdit}
@@ -1167,6 +1201,17 @@ export default function TradingJournal() {
       )}
       {view === "log" && (
         <TradeLogView trades={trades} strategies={strategies} accounts={accounts} settings={settings} onEdit={startEdit} onDelete={handleDelete} />
+      )}
+      {view === "timeline" && (
+        <TimelineView
+          notes={notes}
+          strategies={strategies}
+          settings={settings}
+          accounts={accounts}
+          onAddNote={addNote}
+          onUpdateNote={updateNote}
+          onDeleteNote={deleteNote}
+        />
       )}
       {view === "optimizer" && (
         <OptimizerView trades={trades} strategies={strategies} accounts={accounts} />
@@ -1245,6 +1290,245 @@ function ImportPreviewModal({ preview, existingCount, onAppend, onReplace, onCan
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+// ---------- timeline / notes ----------
+
+function NoteForm({ initial, strategies, settings, accounts, defaultLinks, onSave, onCancel }) {
+  const [date, setDate] = useState(initial?.date || new Date().toISOString().slice(0, 10));
+  const [category, setCategory] = useState(initial?.category || (defaultLinks?.[0]?.type) || "general");
+  const [links, setLinks] = useState(initial ? getNoteLinks(initial) : (defaultLinks || []));
+  const [title, setTitle] = useState(initial?.title || "");
+  const [body, setBody] = useState(initial?.body || "");
+  const [error, setError] = useState("");
+
+  const toggleLink = (type, key) => {
+    setLinks((prev) => {
+      const exists = prev.some((l) => l.type === type && l.key === key);
+      if (exists) return prev.filter((l) => !(l.type === type && l.key === key));
+      return [...prev, { type, key }];
+    });
+  };
+  const isLinked = (type, key) => links.some((l) => l.type === type && l.key === key);
+
+  const submit = (e) => {
+    e.preventDefault();
+    if (!title.trim()) { setError("Give the note a title."); return; }
+    onSave({ date, category, links, title: title.trim(), body: body.trim() });
+  };
+
+  return (
+    <form onSubmit={submit} className="fj-panel" style={{ marginBottom: 14 }}>
+      <div className="fj-form-row" style={{ gridTemplateColumns: "150px 1fr", marginBottom: 10 }}>
+        <div className="fj-form-field">
+          <label>Date</label>
+          <input type="date" className="fj-input" value={date} onChange={(e) => setDate(e.target.value)} />
+        </div>
+        <div className="fj-form-field">
+          <label>Category</label>
+          <select className="fj-select" value={category} onChange={(e) => setCategory(e.target.value)}>
+            {NOTE_CATEGORIES.map(([key, label]) => <option key={key} value={key}>{label}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {strategies.length > 0 && (
+        <div className="fj-form-field" style={{ marginBottom: 10 }}>
+          <label>Link to strategies (optional, select any number)</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {strategies.map((s) => {
+              const active = isLinked("strategy", s);
+              return (
+                <span key={s} className="fj-chip" style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "#1B1E24", fontWeight: 600 } : undefined} onClick={() => toggleLink("strategy", s)}>
+                  {s}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="fj-form-field" style={{ marginBottom: 10 }}>
+        <label>Link to markets (optional, select any number)</label>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {Object.keys(settings).map((m) => {
+            const active = isLinked("market", m);
+            return (
+              <span key={m} className="fj-chip" style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "#1B1E24", fontWeight: 600 } : undefined} onClick={() => toggleLink("market", m)}>
+                {m}
+              </span>
+            );
+          })}
+        </div>
+      </div>
+
+      {accounts.length > 0 && (
+        <div className="fj-form-field" style={{ marginBottom: 10 }}>
+          <label>Link to accounts (optional, select any number)</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {accounts.map((a) => {
+              const active = isLinked("account", a.name);
+              return (
+                <span key={a.id} className="fj-chip" style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "#1B1E24", fontWeight: 600 } : undefined} onClick={() => toggleLink("account", a.name)}>
+                  {a.name}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      <div className="fj-form-field" style={{ marginBottom: 10 }}>
+        <label>Title</label>
+        <input className="fj-input" style={{ fontFamily: "Inter, sans-serif" }} placeholder="e.g. Cut MES 9:30-10 base size from 4 to 2" value={title} onChange={(e) => setTitle(e.target.value)} />
+      </div>
+      <div className="fj-form-field" style={{ marginBottom: 12 }}>
+        <label>Details (optional)</label>
+        <textarea
+          className="fj-input" style={{ fontFamily: "Inter, sans-serif", width: "100%", minHeight: 70, resize: "vertical" }}
+          placeholder="Why the change, what prompted it, anything worth remembering later…"
+          value={body} onChange={(e) => setBody(e.target.value)}
+        />
+      </div>
+
+      {error && <div className="fj-loss" style={{ fontSize: 12, marginBottom: 8 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+        <button type="button" className="fj-btn" onClick={onCancel}>Cancel</button>
+        <button type="submit" className="fj-btn primary">{initial ? "Save changes" : "Add note"}</button>
+      </div>
+    </form>
+  );
+}
+
+function NoteCard({ note, strategies, settings, accounts, onEdit, onDelete, editing, onSaveEdit, onCancelEdit }) {
+  if (editing) {
+    return (
+      <NoteForm
+        initial={note} strategies={strategies} settings={settings} accounts={accounts}
+        onSave={onSaveEdit} onCancel={onCancelEdit}
+      />
+    );
+  }
+  const links = getNoteLinks(note);
+  return (
+    <div className="fj-panel" style={{ marginBottom: 10 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10 }}>
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 6 }}>
+            <span className={`fj-badge ${note.category === "general" ? "cash" : "eval"}`}>{NOTE_CATEGORY_LABEL[note.category] || note.category}</span>
+            <span className="fj-sub" style={{ margin: 0 }}>{note.date}</span>
+            {links.map((l, i) => (
+              <span key={i} className="fj-sub" style={{ margin: 0, padding: "2px 8px", background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 20, fontSize: 11 }}>
+                {l.type}: <b style={{ color: "var(--text)" }}>{l.key}</b>
+              </span>
+            ))}
+          </div>
+          <div style={{ fontWeight: 600, fontSize: 14.5 }}>{note.title}</div>
+          {note.body && <div className="fj-sub" style={{ marginTop: 5, lineHeight: 1.5 }}>{note.body}</div>}
+        </div>
+        <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+          <button className="fj-iconbtn" onClick={onEdit}><Pencil size={13} /></button>
+          <button className="fj-iconbtn" onClick={onDelete}><Trash2 size={13} /></button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function NoteBanner({ note, strategies, settings, accounts, onEdit, onDelete, editing, onSaveEdit, onCancelEdit }) {
+  const [open, setOpen] = useState(false);
+  if (editing) {
+    return (
+      <NoteForm
+        initial={note} strategies={strategies} settings={settings} accounts={accounts}
+        onSave={onSaveEdit} onCancel={onCancelEdit}
+      />
+    );
+  }
+  const links = getNoteLinks(note);
+  return (
+    <div className="fj-panel" style={{ padding: 0, marginBottom: 8, overflow: "hidden" }}>
+      <div
+        style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", cursor: "pointer" }}
+        onClick={() => setOpen((o) => !o)}
+      >
+        <span className="fj-sub" style={{ margin: 0, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>{note.date}</span>
+        <span className={`fj-badge ${note.category === "general" ? "cash" : "eval"}`} style={{ marginTop: 0, flexShrink: 0 }}>{NOTE_CATEGORY_LABEL[note.category] || note.category}</span>
+        <span style={{ flex: 1, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title}</span>
+        {open ? <ChevronUp size={14} color="#8B929E" /> : <ChevronDown size={14} color="#8B929E" />}
+      </div>
+      {open && (
+        <div style={{ padding: "0 12px 12px" }}>
+          {links.length > 0 && (
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 8 }}>
+              {links.map((l, i) => (
+                <span key={i} className="fj-sub" style={{ margin: 0, padding: "2px 8px", background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 20, fontSize: 11 }}>
+                  {l.type}: <b style={{ color: "var(--text)" }}>{l.key}</b>
+                </span>
+              ))}
+            </div>
+          )}
+          {note.body && <div className="fj-sub" style={{ lineHeight: 1.5, marginBottom: 8 }}>{note.body}</div>}
+          <div style={{ display: "flex", gap: 6 }}>
+            <button className="fj-iconbtn" onClick={onEdit}><Pencil size={13} /></button>
+            <button className="fj-iconbtn" onClick={onDelete}><Trash2 size={13} /></button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TimelineView({ notes, strategies, settings, accounts, onAddNote, onUpdateNote, onDeleteNote }) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [filterCategory, setFilterCategory] = useState("");
+
+  const sorted = useMemo(
+    () => [...notes]
+      .filter((n) => !filterCategory || n.category === filterCategory)
+      .sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id)),
+    [notes, filterCategory]
+  );
+
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 14 }}>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          <span className={`fj-chip ${filterCategory === "" ? "active" : ""}`} onClick={() => setFilterCategory("")}>All</span>
+          {NOTE_CATEGORIES.map(([key, label]) => (
+            <span key={key} className={`fj-chip ${filterCategory === key ? "active" : ""}`} onClick={() => setFilterCategory(key)}>{label}</span>
+          ))}
+        </div>
+        <button className="fj-btn primary" onClick={() => setShowAdd((s) => !s)}><Plus size={14} /> Add note</button>
+      </div>
+
+      {showAdd && (
+        <NoteForm
+          strategies={strategies} settings={settings} accounts={accounts}
+          onSave={(note) => { onAddNote(note); setShowAdd(false); }}
+          onCancel={() => setShowAdd(false)}
+        />
+      )}
+
+      {sorted.length === 0 ? (
+        <div className="fj-empty">No notes yet — log strategy changes, market additions, or anything else worth remembering later.</div>
+      ) : (
+        sorted.map((n) => (
+          <NoteCard
+            key={n.id}
+            note={n}
+            strategies={strategies} settings={settings} accounts={accounts}
+            editing={editingId === n.id}
+            onEdit={() => setEditingId(n.id)}
+            onDelete={() => onDeleteNote(n.id)}
+            onSaveEdit={(patch) => { onUpdateNote(n.id, patch); setEditingId(null); }}
+            onCancelEdit={() => setEditingId(null)}
+          />
+        ))
+      )}
     </div>
   );
 }
@@ -1932,35 +2216,91 @@ function HighLineLabel({ viewBox, peak, date }) {
   );
 }
 
-function EquityChart({ curve, color = "#D9A441" }) {
+function ChangeMarkerLabel({ viewBox, note, onHover }) {
+  if (!viewBox) return null;
+  const x = viewBox.x;
+  const y = viewBox.y;
+  return (
+    <g
+      onMouseEnter={() => onHover({ note, x, y })}
+      onMouseLeave={() => onHover(null)}
+      style={{ cursor: "pointer" }}
+    >
+      <rect x={x - 18} y={y - 20} width={36} height={14} rx={3} fill="#14161B" stroke="#D9A441" strokeWidth={1} />
+      <text x={x} y={y - 10} textAnchor="middle" fill="#D9A441" fontSize={9} fontFamily="JetBrains Mono" fontWeight={700}>change</text>
+      <circle cx={x} cy={y} r={3.5} fill="#D9A441" />
+    </g>
+  );
+}
+
+function EquityChart({ curve, color = "#D9A441", changeNotes = [] }) {
   const gradId = useId();
+  const [hoveredMarker, setHoveredMarker] = useState(null);
   if (curve.length === 0) {
     return <div className="fj-empty">No trades yet — add one to start the equity curve.</div>;
   }
   const peak = Math.max(...curve.map((p) => p.equity));
   const peakPoint = curve.find((p) => p.equity === peak);
   const stops = buildTrendGradientStops(curve, "equity");
+
+  // Position each note at the curve point on/just after its date — no
+  // exact trade may exist on that date, so this finds the closest one.
+  const markers = changeNotes
+    .map((n) => {
+      let matched = curve[0];
+      for (const p of curve) {
+        if (p.date && p.date <= n.date) matched = p;
+        else break;
+      }
+      return { note: n, i: matched?.i };
+    })
+    .filter((m) => m.i !== undefined && m.i !== null);
+  const allVals = curve.map((p) => p.equity);
+  const yMin = Math.min(0, ...allVals);
+  const yMax = Math.max(0, ...allVals);
+
   return (
-    <ResponsiveContainer width="100%" height={220}>
-      <ComposedChart data={curve} margin={{ top: 8, right: 12, left: -10, bottom: 0 }}>
-        <defs>
-          <linearGradient id={`eqFill-${gradId}`} x1="0" y1="0" x2="1" y2="0">
-            {stops.map((s, idx) => <stop key={idx} offset={s.offset} stopColor={s.color} stopOpacity={0.22} />)}
-          </linearGradient>
-        </defs>
-        <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
-        <XAxis dataKey="i" type="number" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-        <YAxis stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-        <Area
-          dataKey={(d) => d.equity} type="monotone" stroke="none"
-          fill={`url(#eqFill-${gradId})`} isAnimationActive={false} legendType="none"
-        />
-        <ReferenceLine y={0} stroke="#3A4150" />
-        <ReferenceLine x={peakPoint?.i} stroke="#5FA37A" strokeDasharray="4 3" label={<HighLineLabel peak={peak} date={peakPoint?.date} />} />
-        <Tooltip content={<ChartTooltip />} cursor={{ stroke: "#3A4150", strokeDasharray: "3 3" }} />
-        <Line type="monotone" dataKey="equity" stroke={color} strokeWidth={2} dot={false} />
-      </ComposedChart>
-    </ResponsiveContainer>
+    <div style={{ position: "relative" }}>
+      <ResponsiveContainer width="100%" height={220}>
+        <ComposedChart data={curve} margin={{ top: 26, right: 12, left: -10, bottom: 0 }}>
+          <defs>
+            <linearGradient id={`eqFill-${gradId}`} x1="0" y1="0" x2="1" y2="0">
+              {stops.map((s, idx) => <stop key={idx} offset={s.offset} stopColor={s.color} stopOpacity={0.22} />)}
+            </linearGradient>
+          </defs>
+          <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
+          <XAxis dataKey="i" type="number" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+          <YAxis stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+          <Area
+            dataKey={(d) => d.equity} type="monotone" stroke="none"
+            fill={`url(#eqFill-${gradId})`} isAnimationActive={false} legendType="none"
+          />
+          <ReferenceLine y={0} stroke="#3A4150" />
+          <ReferenceLine x={peakPoint?.i} stroke="#5FA37A" strokeDasharray="4 3" label={<HighLineLabel peak={peak} date={peakPoint?.date} />} />
+          {markers.map((m) => (
+            <ReferenceLine
+              key={m.note.id}
+              segment={[{ x: m.i, y: yMin }, { x: m.i, y: yMax }]}
+              stroke="#D9A441" strokeOpacity={0.6} strokeDasharray="3 3"
+              label={<ChangeMarkerLabel note={m.note} onHover={setHoveredMarker} />}
+            />
+          ))}
+          <Tooltip content={<ChartTooltip />} cursor={{ stroke: "#3A4150", strokeDasharray: "3 3" }} />
+          <Line type="monotone" dataKey="equity" stroke={color} strokeWidth={2} dot={false} />
+        </ComposedChart>
+      </ResponsiveContainer>
+      {hoveredMarker && (
+        <div style={{
+          position: "absolute", left: Math.max(hoveredMarker.x - 100, 4), top: hoveredMarker.y + 6,
+          background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, padding: "9px 11px",
+          fontSize: 12, width: 210, zIndex: 10, pointerEvents: "none", boxShadow: "0 4px 14px rgba(0,0,0,0.45)",
+        }}>
+          <div style={{ fontFamily: "'JetBrains Mono', monospace", color: "#D9A441", fontSize: 10.5, marginBottom: 3 }}>{hoveredMarker.note.date}</div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontWeight: 600, color: "#E7E5E0", marginBottom: hoveredMarker.note.body ? 4 : 0 }}>{hoveredMarker.note.title}</div>
+          {hoveredMarker.note.body && <div style={{ fontFamily: "Inter, sans-serif", color: "#8B929E", lineHeight: 1.4, fontSize: 11.5 }}>{hoveredMarker.note.body}</div>}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -2797,9 +3137,54 @@ function AccountDetailsEditor({ account, onSave, onCancel }) {
 
 // ---------- trade log ----------
 
-function TradeLog({ trades, onEdit, onDelete }) {
-  const sorted = [...trades].sort((a, b) => new Date(`${b.date}T${b.time || "00:00"}`) - new Date(`${a.date}T${a.time || "00:00"}`));
-  if (sorted.length === 0) return <div className="fj-empty">No trades match the current filters.</div>;
+function NoteRow({ note, onEdit, onDelete, colSpan }) {
+  const [open, setOpen] = useState(false);
+  const links = getNoteLinks(note);
+  return (
+    <>
+      <tr style={{ background: "var(--panel-alt)" }}>
+        <td colSpan={colSpan} style={{ padding: "6px 10px", cursor: "pointer" }} onClick={() => setOpen((o) => !o)}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, fontFamily: "Inter, sans-serif" }}>
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "#8B929E", fontSize: 12 }}>{note.date}</span>
+            <span className={`fj-badge ${note.category === "general" ? "cash" : "eval"}`} style={{ marginTop: 0 }}>{NOTE_CATEGORY_LABEL[note.category] || note.category}</span>
+            <span style={{ fontWeight: 600, fontSize: 13, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title}</span>
+            {open ? <ChevronUp size={13} color="#8B929E" /> : <ChevronDown size={13} color="#8B929E" />}
+          </div>
+        </td>
+      </tr>
+      {open && (
+        <tr style={{ background: "var(--panel-alt)" }}>
+          <td colSpan={colSpan} style={{ padding: "0 10px 10px" }}>
+            {links.length > 0 && (
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 6 }}>
+                {links.map((l, i) => (
+                  <span key={i} className="fj-sub" style={{ margin: 0, padding: "2px 8px", background: "var(--panel)", border: "1px solid var(--border)", borderRadius: 20, fontSize: 11 }}>
+                    {l.type}: <b style={{ color: "var(--text)" }}>{l.key}</b>
+                  </span>
+                ))}
+              </div>
+            )}
+            {note.body && <div className="fj-sub" style={{ lineHeight: 1.5, marginBottom: 8, fontFamily: "Inter, sans-serif" }}>{note.body}</div>}
+            <div style={{ display: "flex", gap: 6 }}>
+              <button className="fj-iconbtn" onClick={(e) => { e.stopPropagation(); onEdit(); }}><Pencil size={13} /></button>
+              <button className="fj-iconbtn" onClick={(e) => { e.stopPropagation(); onDelete(); }}><Trash2 size={13} /></button>
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
+  );
+}
+
+function TradeLog({ trades, notes, strategies, settings, accounts, editingNoteId, onEditNote, onSaveNoteEdit, onCancelNoteEdit, onDeleteNote, onEdit, onDelete }) {
+  const combined = useMemo(() => {
+    const tradeRows = trades.map((t) => ({ _kind: "trade", data: t, date: t.date, time: t.time || "00:00" }));
+    const noteRows = (notes || []).map((n) => ({ _kind: "note", data: n, date: n.date, time: "12:00" }));
+    return [...tradeRows, ...noteRows].sort((a, b) => new Date(`${b.date}T${b.time}`) - new Date(`${a.date}T${a.time}`));
+  }, [trades, notes]);
+
+  if (combined.length === 0) return <div className="fj-empty">No trades match the current filters.</div>;
+
   return (
     <div className="fj-panel" style={{ overflowX: "auto" }}>
       <table className="fj-table">
@@ -2810,26 +3195,44 @@ function TradeLog({ trades, onEdit, onDelete }) {
           </tr>
         </thead>
         <tbody>
-          {sorted.map((t) => (
-            <tr key={t.id}>
-              <td>{t.date}</td>
-              <td>{t.time || "—"}</td>
-              <td>{t.market}</td>
-              <td style={{ fontFamily: "Inter, sans-serif" }}>{t.strategy || "—"}</td>
-              <td style={{ fontFamily: "Inter, sans-serif", color: "#8B929E" }}>{(t.accounts && t.accounts.length) ? t.accounts.join(", ") : "—"}</td>
-              <td className={t.direction === "Short" ? "fj-loss" : "fj-profit"}>{t.direction}</td>
-              <td>{t.contracts}</td>
-              <td>{t.entry || "—"}</td>
-              <td>{t.exit || "—"}</td>
-              <td className={t.pnl >= 0 ? "fj-profit" : "fj-loss"}>{money(t.pnl)}</td>
-              <td style={{ color: "#8B929E" }}>{formatDuration(t.durationSec)}</td>
-              <td style={{ fontFamily: "Inter, sans-serif", color: "#8B929E", maxWidth: 180, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.notes || ""}</td>
-              <td className="actions">
-                <button className="fj-iconbtn" onClick={() => onEdit(t)}><Pencil size={14} /></button>
-                <button className="fj-iconbtn" onClick={() => onDelete(t.id)}><Trash2 size={14} /></button>
-              </td>
-            </tr>
-          ))}
+          {combined.map((row) => {
+            if (row._kind === "note") {
+              const n = row.data;
+              if (editingNoteId === n.id) {
+                return (
+                  <tr key={`note-edit-${n.id}`}>
+                    <td colSpan={13} style={{ padding: 0 }}>
+                      <div style={{ padding: "10px 12px" }}>
+                        <NoteForm initial={n} strategies={strategies} settings={settings} accounts={accounts} onSave={onSaveNoteEdit} onCancel={onCancelNoteEdit} />
+                      </div>
+                    </td>
+                  </tr>
+                );
+              }
+              return <NoteRow key={`note-${n.id}`} note={n} onEdit={() => onEditNote(n.id)} onDelete={() => onDeleteNote(n.id)} colSpan={13} />;
+            }
+            const t = row.data;
+            return (
+              <tr key={t.id}>
+                <td>{t.date}</td>
+                <td>{t.time || "—"}</td>
+                <td>{t.market}</td>
+                <td style={{ fontFamily: "Inter, sans-serif" }}>{t.strategy || "—"}</td>
+                <td style={{ fontFamily: "Inter, sans-serif", color: "#8B929E" }}>{(t.accounts && t.accounts.length) ? t.accounts.join(", ") : "—"}</td>
+                <td className={t.direction === "Short" ? "fj-loss" : "fj-profit"}>{t.direction}</td>
+                <td>{t.contracts}</td>
+                <td>{t.entry || "—"}</td>
+                <td>{t.exit || "—"}</td>
+                <td className={t.pnl >= 0 ? "fj-profit" : "fj-loss"}>{money(t.pnl)}</td>
+                <td style={{ color: "#8B929E" }}>{formatDuration(t.durationSec)}</td>
+                <td style={{ fontFamily: "Inter, sans-serif", color: "#8B929E", maxWidth: 180, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.notes || ""}</td>
+                <td className="actions">
+                  <button className="fj-iconbtn" onClick={() => onEdit(t)}><Pencil size={14} /></button>
+                  <button className="fj-iconbtn" onClick={() => onDelete(t.id)}><Trash2 size={14} /></button>
+                </td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </div>
@@ -3336,10 +3739,20 @@ function ConsecutiveLossPanel({ trades }) {
   );
 }
 
-function DetailView({ selected, trades, settings, strategies, onBack, onNavigate, onEdit, onDelete }) {
+function DetailView({ selected, trades, settings, strategies, notes, accounts, onAddNote, onUpdateNote, onDeleteNote, onBack, onNavigate, onEdit, onDelete }) {
   const isStrategy = selected.type === "strategy";
   const list = isStrategy ? strategies : Object.keys(settings);
   const idx = list.indexOf(selected.key);
+  const [showAddNote, setShowAddNote] = useState(false);
+  const [editingNoteId, setEditingNoteId] = useState(null);
+
+  useEffect(() => { setShowAddNote(false); setEditingNoteId(null); }, [selected.type, selected.key]);
+
+  const entityNotes = useMemo(
+    () => notes.filter((n) => getNoteLinks(n).some((l) => l.type === selected.type && l.key === selected.key))
+      .sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id)),
+    [notes, selected.type, selected.key]
+  );
 
   const entityTrades = useMemo(
     () => trades.filter((t) => isStrategy ? t.strategy === selected.key : t.market === selected.key),
@@ -3374,6 +3787,26 @@ function DetailView({ selected, trades, settings, strategies, onBack, onNavigate
         )}
       </div>
 
+      <div className="fj-panel">
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: showAddNote ? 12 : 0 }}>
+          <div>
+            <p className="fj-panel-title" style={{ margin: 0 }}>Notes</p>
+            <div className="fj-sub" style={{ marginTop: 2 }}>{entityNotes.length} logged — shown inline in the trade log below, on the date they happened.</div>
+          </div>
+          <button className="fj-btn" style={{ padding: "5px 10px" }} onClick={() => setShowAddNote((s) => !s)}><Plus size={13} /> Add note</button>
+        </div>
+        {showAddNote && (
+          <div style={{ marginTop: 12 }}>
+            <NoteForm
+              strategies={strategies} settings={settings} accounts={accounts}
+              defaultLinks={[{ type: selected.type, key: selected.key }]}
+              onSave={(note) => { onAddNote(note); setShowAddNote(false); }}
+              onCancel={() => setShowAddNote(false)}
+            />
+          </div>
+        )}
+      </div>
+
       <StatGrid stats={stats} />
 
       {stats.n > 0 && (
@@ -3389,7 +3822,7 @@ function DetailView({ selected, trades, settings, strategies, onBack, onNavigate
         <>
           <div className="fj-panel">
             <p className="fj-panel-title">Equity curve</p>
-            <EquityChart curve={curve} color={accent} />
+            <EquityChart curve={curve} color={accent} changeNotes={entityNotes} />
           </div>
 
           <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
@@ -3418,7 +3851,16 @@ function DetailView({ selected, trades, settings, strategies, onBack, onNavigate
 
           <div className="fj-panel">
             <p className="fj-panel-title">Trade log</p>
-            <TradeLog trades={entityTrades} onEdit={onEdit} onDelete={onDelete} />
+            <TradeLog
+              trades={entityTrades}
+              notes={entityNotes}
+              strategies={strategies} settings={settings} accounts={accounts}
+              editingNoteId={editingNoteId} onEditNote={setEditingNoteId}
+              onSaveNoteEdit={(patch) => { onUpdateNote(editingNoteId, patch); setEditingNoteId(null); }}
+              onCancelNoteEdit={() => setEditingNoteId(null)}
+              onDeleteNote={onDeleteNote}
+              onEdit={onEdit} onDelete={onDelete}
+            />
           </div>
         </>
       )}
