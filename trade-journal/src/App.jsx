@@ -2243,18 +2243,17 @@ function EquityChart({ curve, color = "#D9A441", changeNotes = [] }) {
   const peakPoint = curve.find((p) => p.equity === peak);
   const stops = buildTrendGradientStops(curve, "equity");
 
-  // Position each note at the curve point on/just after its date — no
-  // exact trade may exist on that date, so this finds the closest one.
+  // Position each note at the boundary just before the FIRST real trade on
+  // its date, not the last one on/before it — so every trade that date
+  // (the whole day's worth) reads as happening after the change, matching
+  // how the trade log treats the same date.
   const markers = changeNotes
     .map((n) => {
-      let matched = curve[0];
-      for (const p of curve) {
-        if (p.date && p.date <= n.date) matched = p;
-        else break;
-      }
-      return { note: n, i: matched?.i };
+      const firstOnOrAfter = curve.find((p) => p.i > 0 && p.date && p.date >= n.date);
+      const i = firstOnOrAfter ? firstOnOrAfter.i - 1 : curve[curve.length - 1]?.i;
+      return { note: n, i };
     })
-    .filter((m) => m.i !== undefined && m.i !== null);
+    .filter((m) => m.i !== undefined && m.i !== null && m.i >= 0);
   const allVals = curve.map((p) => p.equity);
   const yMin = Math.min(0, ...allVals);
   const yMax = Math.max(0, ...allVals);
@@ -3179,7 +3178,7 @@ function NoteRow({ note, onEdit, onDelete, colSpan }) {
 function TradeLog({ trades, notes, strategies, settings, accounts, editingNoteId, onEditNote, onSaveNoteEdit, onCancelNoteEdit, onDeleteNote, onEdit, onDelete }) {
   const combined = useMemo(() => {
     const tradeRows = trades.map((t) => ({ _kind: "trade", data: t, date: t.date, time: t.time || "00:00" }));
-    const noteRows = (notes || []).map((n) => ({ _kind: "note", data: n, date: n.date, time: "12:00" }));
+    const noteRows = (notes || []).map((n) => ({ _kind: "note", data: n, date: n.date, time: "00:00" }));
     return [...tradeRows, ...noteRows].sort((a, b) => new Date(`${b.date}T${b.time}`) - new Date(`${a.date}T${a.time}`));
   }, [trades, notes]);
 
@@ -3739,6 +3738,75 @@ function ConsecutiveLossPanel({ trades }) {
   );
 }
 
+function ChangeComparisonPanel({ trades, notes }) {
+  const sortedNotes = useMemo(
+    () => [...notes].sort((a, b) => b.date.localeCompare(a.date) || b.id.localeCompare(a.id)),
+    [notes]
+  );
+  const [selectedId, setSelectedId] = useState(sortedNotes[0]?.id || "");
+
+  if (notes.length === 0) return null;
+  const selectedNote = sortedNotes.find((n) => n.id === selectedId) || sortedNotes[0];
+
+  const before = trades.filter((t) => t.date < selectedNote.date);
+  const after = trades.filter((t) => t.date >= selectedNote.date);
+  const beforeStats = calcStats(before);
+  const afterStats = calcStats(after);
+
+  const row = (label, key, fmt) => (
+    <tr key={key}>
+      <td style={{ fontFamily: "Inter, sans-serif", fontWeight: 600 }}>{label}</td>
+      <td>{beforeStats.n ? fmt(beforeStats) : "—"}</td>
+      <td>{afterStats.n ? fmt(afterStats) : "—"}</td>
+    </tr>
+  );
+
+  return (
+    <div className="fj-panel">
+      <p className="fj-panel-title">Compare pre/post change</p>
+      <div className="fj-sub" style={{ marginBottom: 12 }}>
+        Splits this strategy's trades at a documented change — trades before that date vs. on/after it.
+      </div>
+
+      {sortedNotes.length > 1 ? (
+        <div className="fj-form-field" style={{ marginBottom: 14, maxWidth: 340 }}>
+          <label>Change to compare around</label>
+          <select className="fj-select" value={selectedId} onChange={(e) => setSelectedId(e.target.value)}>
+            {sortedNotes.map((n) => <option key={n.id} value={n.id}>{n.date} — {n.title}</option>)}
+          </select>
+        </div>
+      ) : (
+        <div className="fj-sub" style={{ marginBottom: 14 }}>
+          Comparing around: <b style={{ color: "var(--text)" }}>{selectedNote.date} — {selectedNote.title}</b>
+        </div>
+      )}
+
+      <div style={{ overflowX: "auto" }}>
+        <table className="fj-table">
+          <thead>
+            <tr><th></th><th>Before ({beforeStats.n} trade{beforeStats.n === 1 ? "" : "s"})</th><th>After ({afterStats.n} trade{afterStats.n === 1 ? "" : "s"})</th></tr>
+          </thead>
+          <tbody>
+            {row("Total P&L", "pnl", (s) => <span className={s.totalPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(s.totalPnl)}</span>)}
+            {row("Win rate", "wr", (s) => pct(s.winRate))}
+            {row("Avg win", "aw", (s) => <span className="fj-profit">{money(s.avgWin)}</span>)}
+            {row("Avg loss", "al", (s) => <span className="fj-loss">{money(-s.avgLoss)}</span>)}
+            {row("Profit factor", "pf", (s) => s.profitFactor === null ? "—" : s.profitFactor === Infinity ? "∞" : s.profitFactor.toFixed(2))}
+            {row("Expectancy / trade", "exp", (s) => <span className={s.expectancy >= 0 ? "fj-profit" : "fj-loss"}>{money(s.expectancy)}</span>)}
+            {row("Max drawdown", "dd", (s) => <span className="fj-loss">{money(-s.maxDD)}</span>)}
+            {row("Longest loss streak", "ls", (s) => `${s.maxLossStreak} trade${s.maxLossStreak === 1 ? "" : "s"}`)}
+          </tbody>
+        </table>
+      </div>
+      {afterStats.n > 0 && afterStats.n < 10 && (
+        <div className="fj-sub" style={{ marginTop: 10, fontSize: 11 }}>
+          Only {afterStats.n} trade{afterStats.n === 1 ? "" : "s"} since this change — early to draw conclusions from the "after" side yet.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DetailView({ selected, trades, settings, strategies, notes, accounts, onAddNote, onUpdateNote, onDeleteNote, onBack, onNavigate, onEdit, onDelete }) {
   const isStrategy = selected.type === "strategy";
   const list = isStrategy ? strategies : Object.keys(settings);
@@ -3808,6 +3876,8 @@ function DetailView({ selected, trades, settings, strategies, notes, accounts, o
       </div>
 
       <StatGrid stats={stats} />
+
+      <ChangeComparisonPanel trades={entityTrades} notes={entityNotes} />
 
       {stats.n > 0 && (
         <div className="fj-panel">
