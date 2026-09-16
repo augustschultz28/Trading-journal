@@ -1936,9 +1936,29 @@ function OptimizerView({ trades, strategies, accounts }) {
   const capDepthNum = Math.max(Number(capDepth) || 1, 1);
   const tradesAheadNum = Math.max(Number(numTrades) || 1, 1);
 
-  const actualStats = useMemo(() => calcStats(entityTrades), [entityTrades]);
   const flatAtBase = useMemo(() => flattenTrades(entityTrades, baseNum), [entityTrades, baseNum]);
   const flatStats = useMemo(() => calcStats(flatAtBase), [flatAtBase]);
+
+  // The strategy's own actual base size — the smallest contract count it
+  // was really traded at (same convention used elsewhere in this app for
+  // detecting a martingale's base). Needed to rescale the WHOLE historical
+  // martingale sequence proportionally when the stated base size changes —
+  // futures P&L scales linearly with size, so scaling the base scales
+  // every step in the sequence by the same factor.
+  const historicalBase = useMemo(() => {
+    const sizes = entityTrades.map((t) => t.contracts || 1).filter((c) => c > 0);
+    return sizes.length ? Math.min(...sizes) : 1;
+  }, [entityTrades]);
+
+  const scaledMartingaleTrades = useMemo(() => {
+    const scaleFactor = baseNum / historicalBase;
+    return entityTrades.map((t) => ({
+      ...t,
+      contracts: Math.max(1, Math.round((t.contracts || 1) * scaleFactor)),
+      pnl: t.pnl * scaleFactor,
+    }));
+  }, [entityTrades, baseNum, historicalBase]);
+  const scaledMartingaleStats = useMemo(() => calcStats(scaledMartingaleTrades), [scaledMartingaleTrades]);
 
   const depthSweep = useMemo(
     () => computeMartingaleDepthSweep(entityTrades, { baseContracts: baseNum, capDepth: capDepthNum, buffer: bufferNum, numTrades: tradesAheadNum }),
@@ -1960,8 +1980,9 @@ function OptimizerView({ trades, strategies, accounts }) {
     if (distance > 0) setBuffer(Math.round(distance));
   };
 
-  const pnlDelta = actualStats.totalPnl - flatStats.totalPnl;
-  const ddDelta = actualStats.maxDD - flatStats.maxDD; // positive = martingale drew down more
+  const pnlDelta = scaledMartingaleStats.totalPnl - flatStats.totalPnl;
+  const ddDelta = scaledMartingaleStats.maxDD - flatStats.maxDD; // positive = martingale drew down more
+  const scaleFactor = baseNum / historicalBase;
 
   return (
     <div>
@@ -2018,7 +2039,11 @@ function OptimizerView({ trades, strategies, accounts }) {
           <div className="fj-panel">
             <p className="fj-panel-title">Martingale impact — keep enabled or disable?</p>
             <div className="fj-sub" style={{ marginBottom: 12 }}>
-              As-traded (your real historical contract sizing) vs. flat sizing at your stated base of {baseNum} contract{baseNum === 1 ? "" : "s"} — same trades, same wins and losses, only the sizing changes.
+              This strategy was actually traded at a base of {historicalBase} contract{historicalBase === 1 ? "" : "s"}.
+              {scaleFactor !== 1
+                ? ` "As traded" below is rescaled ×${scaleFactor.toFixed(2)} to match your stated base of ${baseNum} — same win/loss pattern, sized as if the whole martingale sequence had started from ${baseNum} instead.`
+                : ` Your stated base matches what was actually traded, so no rescaling is applied.`}
+              {" "}Compared against flat sizing at that same base — same trades, same wins and losses, only the sizing changes.
             </div>
             <div style={{ overflowX: "auto" }}>
               <table className="fj-table">
@@ -2028,10 +2053,10 @@ function OptimizerView({ trades, strategies, accounts }) {
                 <tbody>
                   <tr>
                     <td style={{ fontFamily: "Inter, sans-serif", fontWeight: 600 }}>As traded (martingale)</td>
-                    <td className={actualStats.totalPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(actualStats.totalPnl)}</td>
-                    <td className="fj-loss">{money(-actualStats.maxDD)}</td>
-                    <td>{actualStats.profitFactor === null ? "—" : actualStats.profitFactor === Infinity ? "∞" : actualStats.profitFactor.toFixed(2)}</td>
-                    <td>{pct(actualStats.winRate)}</td>
+                    <td className={scaledMartingaleStats.totalPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(scaledMartingaleStats.totalPnl)}</td>
+                    <td className="fj-loss">{money(-scaledMartingaleStats.maxDD)}</td>
+                    <td>{scaledMartingaleStats.profitFactor === null ? "—" : scaledMartingaleStats.profitFactor === Infinity ? "∞" : scaledMartingaleStats.profitFactor.toFixed(2)}</td>
+                    <td>{pct(scaledMartingaleStats.winRate)}</td>
                   </tr>
                   <tr>
                     <td style={{ fontFamily: "Inter, sans-serif", fontWeight: 600 }}>Flat at base size</td>
