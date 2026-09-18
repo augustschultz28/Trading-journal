@@ -614,6 +614,7 @@ export default function TradingJournal() {
   const [view, setView] = useState("home"); // home | calendar | accounts | log | timeline | optimizer
   const [selectedEntity, setSelectedEntity] = useState(null); // { type: 'strategy'|'market', key } | null
   const [showForm, setShowForm] = useState(false);
+  const [showBulkForm, setShowBulkForm] = useState(false);
   const [editingId, setEditingId] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
 
@@ -661,6 +662,21 @@ export default function TradingJournal() {
 
   const handleDelete = (id) => setTrades((prev) => prev.filter((t) => t.id !== id));
   const startEdit = (t) => { setEditingId(t.id); setShowForm(true); };
+
+  // Manually log several trades at once from one form, instead of opening
+  // "Add trade" over and over for a single-trade-at-a-time entry.
+  const handleBulkAdd = (newTrades) => {
+    setTrades((prev) => [...prev, ...newTrades.map((t) => ({ ...t, id: uid() }))]);
+    setShowBulkForm(false);
+  };
+
+  // Bulk-reassign fields (strategy and/or accounts) across a set of already-logged
+  // trades at once — same idea as the bulk-tagging step in the Tradovate import
+  // flow, but for trades already sitting in the log.
+  const handleBulkUpdate = (ids, patch) => {
+    const idSet = new Set(ids);
+    setTrades((prev) => prev.map((t) => (idSet.has(t.id) ? { ...t, ...patch } : t)));
+  };
 
   const addNote = (note) => setNotes((prev) => [...prev, { ...note, id: uid() }]);
   const updateNote = (id, patch) => setNotes((prev) => prev.map((n) => n.id === id ? { ...n, ...patch } : n));
@@ -1068,6 +1084,7 @@ export default function TradingJournal() {
 
       <Header
         onAdd={() => { setEditingId(null); setShowForm(true); }}
+        onBulkAdd={() => setShowBulkForm(true)}
         onSettings={() => setShowSettings((s) => !s)}
         onExport={handleExport}
         onImportClick={triggerImport}
@@ -1181,6 +1198,7 @@ export default function TradingJournal() {
             onNavigate={(type, key) => setSelectedEntity({ type, key })}
             onEdit={startEdit}
             onDelete={handleDelete}
+            onBulkUpdate={handleBulkUpdate}
           />
         ) : (
           <HomeView
@@ -1200,7 +1218,7 @@ export default function TradingJournal() {
         <AccountsView accounts={accounts} setAccounts={setAccounts} trades={trades} setTrades={setTrades} />
       )}
       {view === "log" && (
-        <TradeLogView trades={trades} strategies={strategies} accounts={accounts} settings={settings} onEdit={startEdit} onDelete={handleDelete} />
+        <TradeLogView trades={trades} strategies={strategies} accounts={accounts} settings={settings} onEdit={startEdit} onDelete={handleDelete} onBulkUpdate={handleBulkUpdate} />
       )}
       {view === "timeline" && (
         <TimelineView
@@ -1227,13 +1245,23 @@ export default function TradingJournal() {
           onSave={handleSave}
         />
       )}
+
+      {showBulkForm && (
+        <BulkTradeForm
+          strategies={strategies}
+          accounts={accounts}
+          settings={settings}
+          onCancel={() => setShowBulkForm(false)}
+          onSave={handleBulkAdd}
+        />
+      )}
     </div>
   );
 }
 
 // ---------- header ----------
 
-function Header({ onAdd, onSettings, onExport, onImportClick, onTradovateImportClick, onBackup, onRestoreClick }) {
+function Header({ onAdd, onBulkAdd, onSettings, onExport, onImportClick, onTradovateImportClick, onBackup, onRestoreClick }) {
   return (
     <div className="fj-header">
       <div>
@@ -1247,6 +1275,7 @@ function Header({ onAdd, onSettings, onExport, onImportClick, onTradovateImportC
         <button className="fj-btn" onClick={onExport}><Download size={14} /> Export CSV</button>
         <button className="fj-btn" onClick={onRestoreClick} title="Restore trades, accounts, and settings from a backup file"><Upload size={14} /> Restore backup</button>
         <button className="fj-btn" onClick={onBackup} title="Download everything — trades, accounts, settings — as one file"><Download size={14} /> Backup all data</button>
+        <button className="fj-btn" onClick={onBulkAdd} title="Log several trades at once in a table, instead of one at a time"><Plus size={15} /> Add multiple trades</button>
         <button className="fj-btn primary" onClick={onAdd}><Plus size={15} /> Add trade</button>
       </div>
     </div>
@@ -1883,7 +1912,7 @@ function FilterBar({ settings, strategies, accounts, filterMarkets, filterStrate
 
 // ---------- trade log (with its own local filters — not shared across tabs) ----------
 
-function TradeLogView({ trades, strategies, accounts, settings, onEdit, onDelete }) {
+function TradeLogView({ trades, strategies, accounts, settings, onEdit, onDelete, onBulkUpdate }) {
   const [filterMarkets, setFilterMarkets] = useState([]);
   const [filterStrategies, setFilterStrategies] = useState([]);
   const [filterAccounts, setFilterAccounts] = useState([]);
@@ -1913,7 +1942,7 @@ function TradeLogView({ trades, strategies, accounts, settings, onEdit, onDelete
         dateFrom={dateFrom} dateTo={dateTo} setDateFrom={setDateFrom} setDateTo={setDateTo}
         onReset={resetFilters}
       />
-      <TradeLog trades={filtered} onEdit={onEdit} onDelete={onDelete} />
+      <TradeLog trades={filtered} strategies={strategies} accounts={accounts} onEdit={onEdit} onDelete={onDelete} onBulkUpdate={onBulkUpdate} />
     </div>
   );
 }
@@ -3200,20 +3229,120 @@ function NoteRow({ note, onEdit, onDelete, colSpan }) {
   );
 }
 
-function TradeLog({ trades, notes, strategies, settings, accounts, editingNoteId, onEditNote, onSaveNoteEdit, onCancelNoteEdit, onDeleteNote, onEdit, onDelete }) {
+function TradeLog({ trades, notes, strategies, settings, accounts, editingNoteId, onEditNote, onSaveNoteEdit, onCancelNoteEdit, onDeleteNote, onEdit, onDelete, onBulkUpdate }) {
+  const [bulkMode, setBulkMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState(new Set());
+  const [bulkStrategy, setBulkStrategy] = useState("");
+  const [bulkAccounts, setBulkAccounts] = useState([]);
+
   const combined = useMemo(() => {
     const tradeRows = trades.map((t) => ({ _kind: "trade", data: t, date: t.date, time: t.time || "00:00" }));
     const noteRows = (notes || []).map((n) => ({ _kind: "note", data: n, date: n.date, time: "00:00" }));
     return [...tradeRows, ...noteRows].sort((a, b) => new Date(`${b.date}T${b.time}`) - new Date(`${a.date}T${a.time}`));
   }, [trades, notes]);
 
+  const tradeIds = useMemo(() => trades.map((t) => t.id), [trades]);
+  const allSelected = tradeIds.length > 0 && tradeIds.every((id) => selectedIds.has(id));
+
+  const toggleBulkMode = () => {
+    setBulkMode((v) => !v);
+    setSelectedIds(new Set());
+    setBulkStrategy("");
+    setBulkAccounts([]);
+  };
+
+  const toggleSelect = (id) => {
+    setSelectedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+
+  const toggleSelectAll = () => setSelectedIds(allSelected ? new Set() : new Set(tradeIds));
+
+  const toggleBulkAccount = (name) =>
+    setBulkAccounts((prev) => (prev.includes(name) ? prev.filter((a) => a !== name) : [...prev, name]));
+
+  const applyBulk = () => {
+    if (!onBulkUpdate || selectedIds.size === 0) return;
+    const patch = {};
+    if (bulkStrategy.trim()) patch.strategy = bulkStrategy.trim();
+    if (bulkAccounts.length) patch.accounts = bulkAccounts;
+    if (Object.keys(patch).length === 0) return;
+    onBulkUpdate(Array.from(selectedIds), patch);
+    setSelectedIds(new Set());
+    setBulkStrategy("");
+    setBulkAccounts([]);
+  };
+
   if (combined.length === 0) return <div className="fj-empty">No trades match the current filters.</div>;
+
+  const colCount = 13 + (bulkMode ? 1 : 0);
 
   return (
     <div className="fj-panel" style={{ overflowX: "auto" }}>
+      {onBulkUpdate && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: bulkMode ? 10 : 12 }}>
+          <button className="fj-btn" onClick={toggleBulkMode}>
+            {bulkMode ? "Cancel" : "Select trades"}
+          </button>
+        </div>
+      )}
+
+      {bulkMode && (
+        <div className="fj-panel" style={{ background: "rgba(217,164,65,0.08)", borderColor: "var(--amber)", marginBottom: 12 }}>
+          <div className="fj-sub" style={{ marginBottom: 10 }}>
+            {selectedIds.size} trade{selectedIds.size === 1 ? "" : "s"} selected — check rows below, then set a strategy and/or account(s) to apply to all of them at once.
+          </div>
+          <div className="fj-form-row" style={{ gridTemplateColumns: "1fr 1fr auto", alignItems: "end", gap: 10 }}>
+            <div className="fj-form-field">
+              <label>Set strategy</label>
+              <input
+                list="fj-bulk-strategy-options"
+                className="fj-input"
+                value={bulkStrategy}
+                onChange={(e) => setBulkStrategy(e.target.value)}
+                placeholder="Type or pick a strategy…"
+              />
+              <datalist id="fj-bulk-strategy-options">
+                {(strategies || []).map((s) => <option key={s} value={s} />)}
+              </datalist>
+            </div>
+            <div className="fj-form-field">
+              <label>Set account(s)</label>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {(accounts || []).map((a) => (
+                  <span
+                    key={a.id}
+                    className={`fj-chip ${bulkAccounts.includes(a.name) ? "active" : ""}`}
+                    onClick={() => toggleBulkAccount(a.name)}
+                  >
+                    {a.name}
+                  </span>
+                ))}
+                {(!accounts || accounts.length === 0) && <span className="fj-sub">No accounts set up.</span>}
+              </div>
+            </div>
+            <button
+              className="fj-btn primary"
+              disabled={selectedIds.size === 0 || (!bulkStrategy.trim() && bulkAccounts.length === 0)}
+              onClick={applyBulk}
+            >
+              Apply to {selectedIds.size}
+            </button>
+          </div>
+        </div>
+      )}
+
       <table className="fj-table">
         <thead>
           <tr>
+            {bulkMode && (
+              <th style={{ width: 30 }}>
+                <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} />
+              </th>
+            )}
             <th>Date</th><th>Time</th><th>Market</th><th>Strategy</th><th>Accounts</th><th>Dir</th><th>Qty</th>
             <th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Dur.</th><th style={{ fontFamily: "Inter" }}>Notes</th><th></th>
           </tr>
@@ -3225,7 +3354,7 @@ function TradeLog({ trades, notes, strategies, settings, accounts, editingNoteId
               if (editingNoteId === n.id) {
                 return (
                   <tr key={`note-edit-${n.id}`}>
-                    <td colSpan={13} style={{ padding: 0 }}>
+                    <td colSpan={colCount} style={{ padding: 0 }}>
                       <div style={{ padding: "10px 12px" }}>
                         <NoteForm initial={n} strategies={strategies} settings={settings} accounts={accounts} onSave={onSaveNoteEdit} onCancel={onCancelNoteEdit} />
                       </div>
@@ -3233,11 +3362,16 @@ function TradeLog({ trades, notes, strategies, settings, accounts, editingNoteId
                   </tr>
                 );
               }
-              return <NoteRow key={`note-${n.id}`} note={n} onEdit={() => onEditNote(n.id)} onDelete={() => onDeleteNote(n.id)} colSpan={13} />;
+              return <NoteRow key={`note-${n.id}`} note={n} onEdit={() => onEditNote(n.id)} onDelete={() => onDeleteNote(n.id)} colSpan={colCount} />;
             }
             const t = row.data;
             return (
               <tr key={t.id}>
+                {bulkMode && (
+                  <td>
+                    <input type="checkbox" checked={selectedIds.has(t.id)} onChange={() => toggleSelect(t.id)} />
+                  </td>
+                )}
                 <td>{t.date}</td>
                 <td>{t.time || "—"}</td>
                 <td>{t.market}</td>
@@ -3832,7 +3966,7 @@ function ChangeComparisonPanel({ trades, notes }) {
   );
 }
 
-function DetailView({ selected, trades, settings, strategies, notes, accounts, onAddNote, onUpdateNote, onDeleteNote, onBack, onNavigate, onEdit, onDelete }) {
+function DetailView({ selected, trades, settings, strategies, notes, accounts, onAddNote, onUpdateNote, onDeleteNote, onBack, onNavigate, onEdit, onDelete, onBulkUpdate }) {
   const isStrategy = selected.type === "strategy";
   const list = isStrategy ? strategies : Object.keys(settings);
   const idx = list.indexOf(selected.key);
@@ -3955,6 +4089,7 @@ function DetailView({ selected, trades, settings, strategies, notes, accounts, o
               onCancelNoteEdit={() => setEditingNoteId(null)}
               onDeleteNote={onDeleteNote}
               onEdit={onEdit} onDelete={onDelete}
+              onBulkUpdate={onBulkUpdate}
             />
           </div>
         </>
@@ -4366,6 +4501,213 @@ function TradeForm({ initial, strategies, accounts, settings, onCancel, onSave }
             <button type="submit" className="fj-btn primary">{initial ? "Save changes" : "Add trade"}</button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// ---------- bulk manual trade entry ----------
+
+function emptyBulkRow(defaults) {
+  return {
+    _key: uid(),
+    date: defaults.date || new Date().toISOString().slice(0, 10),
+    time: "",
+    market: defaults.market || "MES",
+    strategy: defaults.strategy || "",
+    direction: "Long",
+    contracts: 1,
+    entry: "",
+    exit: "",
+    pnl: "",
+    notes: "",
+  };
+}
+
+function BulkTradeForm({ strategies, accounts, settings, onCancel, onSave }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const [defaultDate, setDefaultDate] = useState(today);
+  const [defaultMarket, setDefaultMarket] = useState("MES");
+  const [defaultStrategy, setDefaultStrategy] = useState("");
+  const [defaultAccounts, setDefaultAccounts] = useState([]);
+
+  const [rows, setRows] = useState(() => [
+    emptyBulkRow({ date: today, market: "MES", strategy: "" }),
+    emptyBulkRow({ date: today, market: "MES", strategy: "" }),
+    emptyBulkRow({ date: today, market: "MES", strategy: "" }),
+  ]);
+
+  const toggleDefaultAccount = (name) =>
+    setDefaultAccounts((prev) => (prev.includes(name) ? prev.filter((a) => a !== name) : [...prev, name]));
+
+  const addRow = () => {
+    setRows((prev) => [...prev, emptyBulkRow({ date: defaultDate, market: defaultMarket, strategy: defaultStrategy })]);
+  };
+
+  const removeRow = (key) => setRows((prev) => (prev.length === 1 ? prev : prev.filter((r) => r._key !== key)));
+
+  const updateRow = (key, field, value) => {
+    setRows((prev) => prev.map((r) => (r._key === key ? { ...r, [field]: value } : r)));
+  };
+
+  const calcRowPnl = (row) => {
+    const mult = Number(settings[row.market]?.multiplier) || 1;
+    const dir = row.direction === "Short" ? -1 : 1;
+    const raw = (Number(row.exit) - Number(row.entry)) * mult * (Number(row.contracts) || 1) * dir;
+    if (!Number.isFinite(raw)) return;
+    updateRow(row._key, "pnl", raw.toFixed(2));
+  };
+
+  const validRows = useMemo(
+    () => rows.filter((r) => r.date && r.market && r.pnl !== "" && !isNaN(Number(r.pnl))),
+    [rows]
+  );
+  const invalidCount = rows.length - validRows.length;
+
+  const submit = () => {
+    if (validRows.length === 0) return;
+    const toSave = validRows.map((r) => ({
+      date: r.date,
+      time: r.time || "",
+      market: r.market,
+      strategy: r.strategy.trim(),
+      direction: r.direction,
+      contracts: Number(r.contracts) || 1,
+      entry: r.entry === "" ? null : Number(r.entry),
+      exit: r.exit === "" ? null : Number(r.exit),
+      fees: 0,
+      pnl: Number(Number(r.pnl).toFixed(2)),
+      notes: r.notes.trim(),
+      accounts: defaultAccounts,
+    }));
+    onSave(toSave);
+  };
+
+  return (
+    <div className="fj-modal-backdrop" onClick={onCancel}>
+      <div className="fj-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 980 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <p className="fj-panel-title" style={{ margin: 0 }}>Add multiple trades</p>
+          <button className="fj-iconbtn" onClick={onCancel}><X size={18} /></button>
+        </div>
+
+        <div className="fj-sub" style={{ marginBottom: 14, lineHeight: 1.6 }}>
+          Log several trades in one go — set defaults below to pre-fill new rows, edit anything per row, then save them all at once.
+        </div>
+
+        <div className="fj-form-row" style={{ gridTemplateColumns: "1fr 1fr 1fr", marginBottom: 6 }}>
+          <div className="fj-form-field">
+            <label>Default date (for new rows)</label>
+            <input type="date" className="fj-input" value={defaultDate} onChange={(e) => setDefaultDate(e.target.value)} />
+          </div>
+          <div className="fj-form-field">
+            <label>Default market (for new rows)</label>
+            <select className="fj-select" value={defaultMarket} onChange={(e) => setDefaultMarket(e.target.value)}>
+              {Object.keys(settings).map((m) => <option key={m} value={m}>{m}</option>)}
+            </select>
+          </div>
+          <div className="fj-form-field">
+            <label>Default strategy (for new rows)</label>
+            <input
+              list="fj-bulkform-strategy-list" className="fj-input" placeholder="e.g. m1 MNQ NY"
+              value={defaultStrategy} onChange={(e) => setDefaultStrategy(e.target.value)}
+            />
+            <datalist id="fj-bulkform-strategy-list">
+              {strategies.map((s) => <option key={s} value={s} />)}
+            </datalist>
+          </div>
+        </div>
+
+        <div className="fj-form-field" style={{ marginBottom: 14 }}>
+          <label>Account(s) to tag on every row (optional)</label>
+          {accounts.length === 0 ? (
+            <div className="fj-sub">No accounts added yet — add one under the Accounts tab.</div>
+          ) : (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {accounts.map((a) => {
+                const active = defaultAccounts.includes(a.name);
+                return (
+                  <span
+                    key={a.id}
+                    className="fj-chip"
+                    style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "#14161B", fontWeight: 600 } : undefined}
+                    onClick={() => toggleDefaultAccount(a.name)}
+                  >
+                    {a.name}
+                  </span>
+                );
+              })}
+            </div>
+          )}
+        </div>
+
+        <div style={{ overflowX: "auto", marginBottom: 12 }}>
+          <table className="fj-table">
+            <thead>
+              <tr>
+                <th>Date</th><th>Time</th><th>Market</th><th style={{ minWidth: 140 }}>Strategy</th><th>Dir</th><th>Qty</th>
+                <th>Entry</th><th>Exit</th><th style={{ minWidth: 90 }}>P&amp;L</th><th style={{ fontFamily: "Inter" }}>Notes</th><th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((r) => {
+                const canCalc = r.entry !== "" && r.exit !== "" && r.contracts !== "";
+                return (
+                  <tr key={r._key}>
+                    <td><input type="date" className="fj-input" style={{ minWidth: 128 }} value={r.date} onChange={(e) => updateRow(r._key, "date", e.target.value)} /></td>
+                    <td><input type="time" className="fj-input" style={{ minWidth: 96 }} value={r.time} onChange={(e) => updateRow(r._key, "time", e.target.value)} /></td>
+                    <td>
+                      <select className="fj-select" value={r.market} onChange={(e) => updateRow(r._key, "market", e.target.value)}>
+                        {Object.keys(settings).map((m) => <option key={m} value={m}>{m}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <input
+                        list="fj-bulkform-strategy-list" className="fj-input" style={{ minWidth: 130 }}
+                        value={r.strategy} onChange={(e) => updateRow(r._key, "strategy", e.target.value)}
+                      />
+                    </td>
+                    <td>
+                      <select className="fj-select" value={r.direction} onChange={(e) => updateRow(r._key, "direction", e.target.value)}>
+                        <option value="Long">Long</option>
+                        <option value="Short">Short</option>
+                      </select>
+                    </td>
+                    <td><input type="number" min="1" step="1" className="fj-input" style={{ width: 56 }} value={r.contracts} onChange={(e) => updateRow(r._key, "contracts", e.target.value)} /></td>
+                    <td><input type="number" step="0.01" className="fj-input" style={{ width: 84 }} value={r.entry} onChange={(e) => updateRow(r._key, "entry", e.target.value)} /></td>
+                    <td><input type="number" step="0.01" className="fj-input" style={{ width: 84 }} value={r.exit} onChange={(e) => updateRow(r._key, "exit", e.target.value)} /></td>
+                    <td>
+                      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                        <input type="number" step="0.01" className="fj-input" style={{ width: 90 }} value={r.pnl} onChange={(e) => updateRow(r._key, "pnl", e.target.value)} placeholder="e.g. 62.50" />
+                        {canCalc && (
+                          <button type="button" className="fj-iconbtn" title="Calculate P&L from entry/exit" onClick={() => calcRowPnl(r)}>↻</button>
+                        )}
+                      </div>
+                    </td>
+                    <td><input className="fj-input" style={{ fontFamily: "Inter, sans-serif", minWidth: 120 }} value={r.notes} onChange={(e) => updateRow(r._key, "notes", e.target.value)} /></td>
+                    <td className="actions">
+                      <button type="button" className="fj-iconbtn" onClick={() => removeRow(r._key)} disabled={rows.length === 1}><Trash2 size={14} /></button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10 }}>
+          <button type="button" className="fj-btn" onClick={addRow}><Plus size={14} /> Add row</button>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span className="fj-sub">
+              {validRows.length} of {rows.length} row{rows.length === 1 ? "" : "s"} ready to save
+              {invalidCount > 0 ? ` — ${invalidCount} need a date, market, and P&L` : ""}.
+            </span>
+            <button type="button" className="fj-btn" onClick={onCancel}>Cancel</button>
+            <button type="button" className="fj-btn primary" disabled={validRows.length === 0} onClick={submit}>
+              Save {validRows.length || ""} trade{validRows.length === 1 ? "" : "s"}
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   );
