@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef, useId } from 
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, BarChart, Bar, ReferenceLine, ScatterChart, Scatter, Cell,
-  Area, ComposedChart
+  Area, ComposedChart, ErrorBar
 } from "recharts";
 import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, RotateCcw, Settings2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, ArrowLeft, Upload, Download } from "lucide-react";
 import Papa from "papaparse";
@@ -337,6 +337,248 @@ function computeStreakProbabilities(trades, { streakLens = [3, 4, 5, 6, 7, 8], n
   const probabilities = {};
   streakLens.forEach((L) => { probabilities[L] = streakProbability(lossRate, L, numTrades); });
   return { n, lossRate, numTrades, probabilities, lowSample: n < minTrades };
+}
+
+// Wilson score interval for a binomial proportion (k successes out of n) — used
+// wherever a win rate is shown for a bucket small enough that the raw percentage
+// alone would overstate how well it's actually known. Standard 95% (z=1.96)
+// unless told otherwise. Verified against textbook values (k=5,n=10 -> ~[24%,76%];
+// k=50,n=100 -> ~[40%,60%]) before being wired in here.
+function wilsonInterval(k, n, z = 1.96) {
+  if (!n) return { phat: 0, lower: 0, upper: 1 };
+  const phat = k / n;
+  const z2 = z * z;
+  const center = (phat + z2 / (2 * n)) / (1 + z2 / n);
+  const margin = (z * Math.sqrt((phat * (1 - phat)) / n + z2 / (4 * n * n))) / (1 + z2 / n);
+  return { phat, lower: Math.max(0, center - margin), upper: Math.min(1, center + margin) };
+}
+
+// ---------- strategy grading ----------
+//
+// Student's t critical values (two-tailed, 95%) by degrees of freedom —
+// used to build a confidence interval on a strategy's expectancy itself
+// (not just its win rate). Verified against known table values (df=9 ->
+// 2.262, df=24 -> 2.064, etc.) before being wired in. Falls back toward
+// the normal-distribution value (1.96) as sample size grows.
+const T_TABLE_95 = {
+  1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228,
+  11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145, 15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093, 20: 2.086,
+  21: 2.080, 22: 2.074, 23: 2.069, 24: 2.064, 25: 2.060, 26: 2.056, 27: 2.052, 28: 2.048, 29: 2.045, 30: 2.042,
+  40: 2.021, 60: 2.000, 120: 1.980,
+};
+function tCritical95(df) {
+  if (df < 1) return T_TABLE_95[1];
+  if (df <= 30) return T_TABLE_95[df];
+  if (df <= 40) return T_TABLE_95[40];
+  if (df <= 60) return T_TABLE_95[60];
+  if (df <= 120) return T_TABLE_95[120];
+  return 1.96;
+}
+
+// Grades a strategy on whether its edge is real (not just lucky) and, if so,
+// how good it is — folding in the stats that matter most rather than one
+// number in isolation:
+//   - Expectancy per contract, with a Student's-t 95% confidence interval —
+//     this is the "is the edge real" test. A strategy can look profitable
+//     and still have a CI that straddles zero, meaning the data can't yet
+//     rule out that it's breaking even or worse.
+//   - Profit factor — how much bigger the wins are than the losses.
+//   - Calmar-like ratio (total P&L ÷ max drawdown) — reward relative to the
+//     worst equity dip actually lived through, not just the total.
+//   - Sample size — reuses the same 10-trade "low sample" bar used
+//     everywhere else in this app (Daily Loss Limit, Risk of Ruin,
+//     Consecutive Loss). A grade can't reach A/B on fewer than that many
+//     trades no matter how good the early numbers look.
+// Everything is computed on the flat 1-contract-normalized trade list, so
+// size doesn't distort the comparison across strategies.
+function computeStrategyGrade(trades, { minTrades = 10 } = {}) {
+  if (!trades || trades.length === 0) return null;
+  const flat = flattenTrades(trades, 1);
+  const perTrade = flat.map((t) => t.pnl);
+  const n = perTrade.length;
+  const mean = perTrade.reduce((a, b) => a + b, 0) / n;
+  const variance = n > 1 ? perTrade.reduce((a, b) => a + (b - mean) ** 2, 0) / (n - 1) : 0;
+  const stdev = Math.sqrt(variance);
+  const se = n > 1 ? stdev / Math.sqrt(n) : 0;
+  const tcrit = tCritical95(Math.max(n - 1, 1));
+  const ciLower = mean - tcrit * se;
+  const ciUpper = mean + tcrit * se;
+  const significance = n > 1 ? (ciLower > 0 ? "confirmed_positive" : ciUpper < 0 ? "confirmed_negative" : "inconclusive") : "inconclusive";
+
+  const stats = calcStats(flat);
+  const calmar = stats.maxDD > 0 ? stats.totalPnl / stats.maxDD : (stats.totalPnl > 0 ? Infinity : 0);
+  const strongPF = stats.profitFactor === Infinity || (stats.profitFactor !== null && stats.profitFactor >= 1.5);
+  const strongCalmar = calmar === Infinity || calmar >= 2;
+  const lowSample = n < minTrades;
+
+  let grade;
+  const reasons = [];
+  if (significance === "confirmed_negative") {
+    grade = "F";
+    reasons.push(`Edge confirmed negative — 95% CI on expectancy is ${money(ciLower)} to ${money(ciUpper)}/contract, entirely below zero.`);
+  } else if (significance === "confirmed_positive") {
+    grade = (strongPF && strongCalmar && !lowSample) ? "A" : "B";
+    reasons.push(`Edge confirmed positive — 95% CI on expectancy is ${money(ciLower)} to ${money(ciUpper)}/contract.`);
+    reasons.push(`Profit factor ${stats.profitFactor === Infinity ? "∞" : stats.profitFactor.toFixed(2)} (${strongPF ? "strong" : "moderate"}).`);
+    reasons.push(`P&L ÷ max drawdown ${calmar === Infinity ? "∞" : calmar.toFixed(2)} (${strongCalmar ? "strong" : "moderate"}).`);
+  } else {
+    grade = mean >= 0 ? "C" : "D";
+    reasons.push(`Edge not yet statistically distinguishable from zero — 95% CI on expectancy is ${money(ciLower)} to ${money(ciUpper)}/contract.`);
+  }
+  if (lowSample && (grade === "A" || grade === "B")) {
+    grade = "C";
+    reasons.push(`Capped at C: under ${minTrades} trades isn't a reliable enough sample to call the edge confirmed yet, whatever the CI says.`);
+  }
+  if (lowSample) reasons.push(`${n} trade${n === 1 ? "" : "s"} logged — treat this grade as provisional until it clears ${minTrades}.`);
+  else reasons.push(`${n} trades logged.`);
+
+  return {
+    grade, n, mean, ciLower, ciUpper, significance, lowSample,
+    profitFactor: stats.profitFactor, calmar, totalPnl: stats.totalPnl,
+    winRate: stats.winRate, maxDD: stats.maxDD, reasons,
+  };
+}
+
+const GRADE_COLORS = {
+  A: "#5FA37A", B: "#8FBF98", C: "#D9A441", D: "#D98F6B", F: "#C2634A",
+};
+
+function GradeBadge({ grade, size = "md" }) {
+  if (!grade) return null;
+  const color = GRADE_COLORS[grade.grade] || "#8B929E";
+  const dims = size === "sm" ? { w: 22, h: 22, fs: 12 } : { w: 30, h: 30, fs: 15 };
+  return (
+    <span
+      title={grade.reasons ? grade.reasons.join(" ") : undefined}
+      style={{
+        display: "inline-flex", alignItems: "center", justifyContent: "center",
+        width: dims.w, height: dims.h, borderRadius: 7,
+        background: `${color}26`, border: `1px solid ${color}66`, color,
+        fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: dims.fs,
+        flexShrink: 0,
+      }}
+    >
+      {grade.grade}
+    </span>
+  );
+}
+
+function StrategyGradePanel({ grade }) {
+  const color = GRADE_COLORS[grade.grade] || "#8B929E";
+  const gradeName = { A: "Confirmed edge, strong", B: "Confirmed edge, moderate", C: "Inconclusive — leaning positive", D: "Inconclusive — leaning negative", F: "Confirmed negative edge" }[grade.grade] || "";
+
+  return (
+    <div className="fj-panel">
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8, marginBottom: 4 }}>
+        <p className="fj-panel-title" style={{ margin: 0 }}>Strategy grade</p>
+        {grade.lowSample && <span className="fj-badge eval" title="Under 10 trades — this grade is provisional">Low sample</span>}
+      </div>
+      <div className="fj-sub" style={{ marginBottom: 14 }}>
+        Grades whether this strategy's edge is statistically real, not just how good the raw numbers look — a strategy can be profitable so far and still not be distinguishable from noise yet.
+      </div>
+
+      <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
+        <span
+          style={{
+            display: "inline-flex", alignItems: "center", justifyContent: "center",
+            width: 56, height: 56, borderRadius: 12,
+            background: `${color}26`, border: `1.5px solid ${color}66`, color,
+            fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 28,
+          }}
+        >
+          {grade.grade}
+        </span>
+        <div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 14, color: "#E7E5E0" }}>{gradeName}</div>
+          <div className="fj-sub" style={{ marginTop: 2 }}>
+            {money(grade.mean)}/contract expectancy · 95% CI {money(grade.ciLower)} to {money(grade.ciUpper)}
+          </div>
+        </div>
+      </div>
+
+      <div className="fj-stat-grid" style={{ marginBottom: 14 }}>
+        <div className="fj-stat-card">
+          <div className="fj-stat-label">Profit factor</div>
+          <div className="fj-stat-value" style={{ fontSize: 15 }}>{grade.profitFactor === null ? "—" : grade.profitFactor === Infinity ? "∞" : grade.profitFactor.toFixed(2)}</div>
+        </div>
+        <div className="fj-stat-card">
+          <div className="fj-stat-label">P&amp;L ÷ max drawdown</div>
+          <div className="fj-stat-value" style={{ fontSize: 15 }}>{grade.calmar === Infinity ? "∞" : grade.calmar.toFixed(2)}</div>
+        </div>
+        <div className="fj-stat-card">
+          <div className="fj-stat-label">Win rate</div>
+          <div className="fj-stat-value" style={{ fontSize: 15 }}>{pct(grade.winRate)}</div>
+        </div>
+        <div className="fj-stat-card">
+          <div className="fj-stat-label">Sample size</div>
+          <div className={`fj-stat-value ${grade.lowSample ? "fj-loss" : ""}`} style={{ fontSize: 15 }}>{grade.n} trade{grade.n === 1 ? "" : "s"}</div>
+        </div>
+      </div>
+
+      <ul style={{ margin: 0, paddingLeft: 18, display: "flex", flexDirection: "column", gap: 4 }}>
+        {grade.reasons.map((r, i) => (
+          <li key={i} className="fj-sub" style={{ fontSize: 12 }}>{r}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+// ---------- stats by martingale depth (1x / 2x / 4x...) ----------
+//
+// Buckets a strategy's trades by size relative to its own detected base size
+// (same "smallest contract count actually traded" convention used by the
+// Optimizer), so 1x/2x/4x lines up with the martingale steps that produced
+// them regardless of what the base itself happens to be. Every per-trade
+// number is normalized to a single contract (pnl / contracts) before being
+// compared across buckets — a 4x trade's raw $ swing is mechanically bigger
+// than a 1x trade's, so only the normalized numbers say anything about
+// whether the SIZE itself is working.
+function computeMartingaleDepthStats(trades, { minTrades = 10 } = {}) {
+  if (!trades || trades.length === 0) return null;
+  const sizes = trades.map((t) => t.contracts || 1).filter((c) => c > 0);
+  const base = sizes.length ? Math.min(...sizes) : 1;
+
+  const buckets = {};
+  trades.forEach((t) => {
+    const c = t.contracts || 1;
+    const ratio = Math.max(c / base, 1);
+    const depth = Math.max(0, Math.round(Math.log2(ratio)));
+    (buckets[depth] = buckets[depth] || []).push(t);
+  });
+
+  const depths = Object.keys(buckets).map(Number).sort((a, b) => a - b);
+  const overall = calcStats(trades);
+  const overallExpectancyPerContract =
+    trades.reduce((s, t) => s + t.pnl / (t.contracts || 1), 0) / trades.length;
+
+  const rows = depths.map((depth) => {
+    const bucketTrades = buckets[depth];
+    const n = bucketTrades.length;
+    const wins = bucketTrades.filter((t) => t.pnl > 0);
+    const losses = bucketTrades.filter((t) => t.pnl < 0);
+    const totalPnl = bucketTrades.reduce((s, t) => s + t.pnl, 0);
+    const expectancyPerContract = bucketTrades.reduce((s, t) => s + t.pnl / (t.contracts || 1), 0) / n;
+    const avgWinPerContract = wins.length
+      ? wins.reduce((s, t) => s + t.pnl / (t.contracts || 1), 0) / wins.length
+      : 0;
+    const avgLossPerContract = losses.length
+      ? losses.reduce((s, t) => s + t.pnl / (t.contracts || 1), 0) / losses.length
+      : 0;
+    const winRate = (wins.length / n) * 100;
+    const ci = wilsonInterval(wins.length, n);
+    return {
+      depth,
+      label: `${Math.pow(2, depth)}x`,
+      contractsAtDepth: base * Math.pow(2, depth),
+      n, wins: wins.length, losses: losses.length,
+      winRate, ciLower: ci.lower * 100, ciUpper: ci.upper * 100,
+      totalPnl, expectancyPerContract, avgWinPerContract, avgLossPerContract,
+      lowSample: n < minTrades,
+    };
+  });
+
+  return { base, overallWinRate: overall.winRate, overallExpectancyPerContract, rows };
 }
 
 // Recomputes a trade list as if every trade had been taken at a flat size
@@ -2465,7 +2707,10 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
   const byStrategy = useMemo(() => {
     const names = Array.from(new Set(categoryScopedTrades.map((t) => t.strategy).filter(Boolean)));
     const list = names
-      .map((s) => ({ key: s, stats: calcStats(categoryScopedTrades.filter((t) => t.strategy === s)), curve: equityCurve(categoryScopedTrades.filter((t) => t.strategy === s)) }));
+      .map((s) => {
+        const stratTrades = categoryScopedTrades.filter((t) => t.strategy === s);
+        return { key: s, stats: calcStats(stratTrades), curve: equityCurve(stratTrades), grade: computeStrategyGrade(stratTrades) };
+      });
     return sortGroups(list, strategySort);
   }, [categoryScopedTrades, strategySort]);
 
@@ -2586,7 +2831,10 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
               <div key={s.key} className="fj-strat-card fj-strat-card-clickable" onClick={() => onSelect("strategy", s.key)}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
                   <div className="fj-strat-name">{s.key}</div>
-                  {isProfit ? <TrendingUp size={14} color="#5FA37A" /> : <TrendingDown size={14} color="#C2634A" />}
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <GradeBadge grade={s.grade} size="sm" />
+                    {isProfit ? <TrendingUp size={14} color="#5FA37A" /> : <TrendingDown size={14} color="#C2634A" />}
+                  </div>
                 </div>
                 <div className={`fj-strat-pnl-big ${isProfit ? "fj-profit" : "fj-loss"}`}>{money(s.stats.totalPnl)}</div>
                 <div className="fj-strat-meta-row">
@@ -3758,6 +4006,170 @@ function WindowStatsPanel({ trades }) {
   );
 }
 
+function MartingaleDepthPanel({ trades }) {
+  const stats = useMemo(() => computeMartingaleDepthStats(trades), [trades]);
+
+  if (!stats || stats.rows.length < 2) {
+    return (
+      <div className="fj-panel">
+        <p className="fj-panel-title">Stats by martingale depth</p>
+        <div className="fj-empty">
+          {stats ? "This strategy has only ever been traded at one size — nothing to compare yet." : "No trades logged for this strategy yet."}
+        </div>
+      </div>
+    );
+  }
+
+  const { base, overallWinRate, overallExpectancyPerContract, rows } = stats;
+
+  const winRateData = rows.map((r) => ({
+    name: r.label,
+    n: r.n,
+    winRate: Number(r.winRate.toFixed(1)),
+    ciDelta: [
+      Math.max(0, r.winRate - r.ciLower),
+      Math.max(0, r.ciUpper - r.winRate),
+    ],
+  }));
+  const evData = rows.map((r) => ({ name: r.label, n: r.n, ev: Number(r.expectancyPerContract.toFixed(2)) }));
+
+  const rowsWithSample = rows.filter((r) => !r.lowSample);
+  const best = rowsWithSample.length
+    ? rowsWithSample.reduce((a, b) => (b.expectancyPerContract > a.expectancyPerContract ? b : a))
+    : null;
+  const worst = rowsWithSample.length
+    ? rowsWithSample.reduce((a, b) => (b.expectancyPerContract < a.expectancyPerContract ? b : a))
+    : null;
+  const mostTraded = rows.reduce((a, b) => (b.n > a.n ? b : a));
+
+  const winRateTick = (props) => {
+    const { x, y, payload } = props;
+    const row = winRateData.find((d) => d.name === payload.value);
+    return (
+      <g transform={`translate(${x},${y})`}>
+        <text x={0} y={0} dy={12} textAnchor="middle" fill="#8B929E" fontSize={11} fontFamily="JetBrains Mono, monospace">{payload.value}</text>
+        <text x={0} y={0} dy={25} textAnchor="middle" fill="#545B68" fontSize={9.5} fontFamily="JetBrains Mono, monospace">n={row ? row.n : 0}</text>
+      </g>
+    );
+  };
+
+  return (
+    <div className="fj-panel">
+      <p className="fj-panel-title">Stats by martingale depth</p>
+      <div className="fj-sub" style={{ marginBottom: 12, lineHeight: 1.6 }}>
+        Detected base size for this strategy: <b style={{ color: "#E7E5E0" }}>{base} contract{base === 1 ? "" : "s"}</b>. Trades are bucketed by size relative to that base (1x/2x/4x…), and every number below is normalized to a single contract — otherwise a 4x trade's bigger dollar swing would just look "more effective" by construction.
+      </div>
+
+      <div className="fj-stat-grid" style={{ marginBottom: 14 }}>
+        <div className="fj-stat-card">
+          <div className="fj-stat-label">Most effective size</div>
+          <div className="fj-stat-value fj-profit" style={{ fontSize: 15 }}>{best ? best.label : "—"}</div>
+          <div className="fj-sub">{best ? `${money(best.expectancyPerContract)}/contract` : "not enough data yet"}</div>
+        </div>
+        <div className="fj-stat-card">
+          <div className="fj-stat-label">Least effective size</div>
+          <div className="fj-stat-value fj-loss" style={{ fontSize: 15 }}>{worst ? worst.label : "—"}</div>
+          <div className="fj-sub">{worst ? `${money(worst.expectancyPerContract)}/contract` : "not enough data yet"}</div>
+        </div>
+        <div className="fj-stat-card">
+          <div className="fj-stat-label">Most traded size</div>
+          <div className="fj-stat-value" style={{ fontSize: 15 }}>{mostTraded.label}</div>
+          <div className="fj-sub">{mostTraded.n} trade{mostTraded.n === 1 ? "" : "s"}</div>
+        </div>
+        <div className="fj-stat-card">
+          <div className="fj-stat-label">Blended (all sizes)</div>
+          <div className="fj-stat-value" style={{ fontSize: 15 }}>{money(overallExpectancyPerContract)}/contract</div>
+          <div className="fj-sub">{pct(overallWinRate)} win rate</div>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
+        <div>
+          <div className="fj-sub" style={{ marginBottom: 6, fontSize: 11.5, textTransform: "uppercase", letterSpacing: 0.4 }}>
+            Win rate by size (95% CI)
+          </div>
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={winRateData} margin={{ top: 4, right: 8, left: -10, bottom: 4 }}>
+              <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
+              <XAxis dataKey="name" stroke="#8B929E" tick={winRateTick} interval={0} height={38} />
+              <YAxis stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} domain={[0, 100]} unit="%" />
+              <ReferenceLine y={overallWinRate} stroke="#D9A441" strokeDasharray="4 3" label={{ value: "blended", position: "insideTopRight", fill: "#D9A441", fontSize: 10 }} />
+              <Tooltip
+                contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+                labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
+                itemStyle={{ color: "#E7E5E0" }}
+                cursor={{ fill: "rgba(139,146,158,0.08)" }}
+                formatter={(v, key, item) => [`${v}% (n=${item.payload.n})`, "Win rate"]}
+              />
+              <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
+                {winRateData.map((d, i) => (
+                  <Cell key={i} fill={d.winRate >= overallWinRate ? "#5FA37A" : "#C2634A"} />
+                ))}
+                <ErrorBar dataKey="ciDelta" width={4} strokeWidth={1.25} stroke="#8B929E" />
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div>
+          <div className="fj-sub" style={{ marginBottom: 6, fontSize: 11.5, textTransform: "uppercase", letterSpacing: 0.4 }}>
+            Expected value per contract by size
+          </div>
+          <ResponsiveContainer width="100%" height={200}>
+            <BarChart data={evData} margin={{ top: 4, right: 8, left: -10, bottom: 4 }}>
+              <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
+              <XAxis dataKey="name" stroke="#8B929E" tick={winRateTick} interval={0} height={38} />
+              <YAxis stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+              <ReferenceLine y={0} stroke="#3A4150" />
+              <ReferenceLine y={overallExpectancyPerContract} stroke="#D9A441" strokeDasharray="4 3" label={{ value: "blended", position: "insideTopRight", fill: "#D9A441", fontSize: 10 }} />
+              <Tooltip
+                contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+                labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
+                itemStyle={{ color: "#E7E5E0" }}
+                cursor={{ fill: "rgba(139,146,158,0.08)" }}
+                formatter={(v, key, item) => [`${money(v)}/contract (n=${item.payload.n})`, "EV"]}
+              />
+              <Bar dataKey="ev" radius={[4, 4, 0, 0]}>
+                {evData.map((d, i) => <Cell key={i} fill={d.ev >= 0 ? "#5FA37A" : "#C2634A"} />)}
+              </Bar>
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div style={{ overflowX: "auto", marginTop: 14 }}>
+        <table className="fj-table">
+          <thead>
+            <tr>
+              <th>Size</th><th>Trades</th><th>Win % (95% CI)</th><th>Avg win /contract</th><th>Avg loss /contract</th><th>EV /contract</th><th>Total $</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.depth}>
+                <td style={{ fontFamily: "Inter, sans-serif", fontWeight: 600 }}>
+                  {r.label} <span style={{ color: "#8B929E", fontWeight: 400 }}>({r.contractsAtDepth}c)</span>
+                  {r.lowSample && <span className="fj-badge eval" style={{ marginLeft: 6 }} title="Under 10 trades — treat this bucket as a rough estimate">Low sample</span>}
+                </td>
+                <td>{r.n} <span style={{ color: "#8B929E" }}>({r.wins}W/{r.losses}L)</span></td>
+                <td>{pct(r.winRate)} <span style={{ color: "#8B929E" }}>({r.ciLower.toFixed(0)}–{r.ciUpper.toFixed(0)}%)</span></td>
+                <td className="fj-profit">{r.wins ? money(r.avgWinPerContract) : "—"}</td>
+                <td className="fj-loss">{r.losses ? money(r.avgLossPerContract) : "—"}</td>
+                <td className={r.expectancyPerContract >= 0 ? "fj-profit" : "fj-loss"}>{money(r.expectancyPerContract)}</td>
+                <td className={r.totalPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(r.totalPnl)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <div className="fj-sub" style={{ fontSize: 11, marginTop: 10 }}>
+        Deeper sizes only happen after a loss, so their sample sizes are structurally smaller — treat any "low sample" bucket's win rate as a wide guess, not a verdict. Wilson 95% CI shown both on the chart (error bars) and in the table.
+      </div>
+    </div>
+  );
+}
+
 // ---------- detail view (strategy or market drill-down) ----------
 
 function DailyLossLimitPanel({ trades }) {
@@ -3992,6 +4404,7 @@ function DetailView({ selected, trades, settings, strategies, notes, accounts, o
   const longStats = useMemo(() => calcStats(longTrades), [longTrades]);
   const shortStats = useMemo(() => calcStats(shortTrades), [shortTrades]);
   const accent = isStrategy ? ACCENT_PALETTE[idx >= 0 ? idx % ACCENT_PALETTE.length : 0] : (settings[selected.key]?.accent || "#D9A441");
+  const grade = useMemo(() => (isStrategy ? computeStrategyGrade(entityTrades) : null), [isStrategy, entityTrades]);
 
   const goPrev = () => { if (list.length === 0) return; onNavigate(selected.type, list[(idx - 1 + list.length) % list.length]); };
   const goNext = () => { if (list.length === 0) return; onNavigate(selected.type, list[(idx + 1) % list.length]); };
@@ -4003,7 +4416,10 @@ function DetailView({ selected, trades, settings, strategies, notes, accounts, o
       <div className="fj-detail-head">
         <div>
           <div className="fj-sub" style={{ textTransform: "uppercase", letterSpacing: 0.5, fontSize: 11 }}>{isStrategy ? "Strategy" : "Market"}</div>
-          <div className="fj-detail-title">{selected.key}{!isStrategy && settings[selected.key] && ` — ${settings[selected.key].label}`}</div>
+          <div className="fj-detail-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <span>{selected.key}{!isStrategy && settings[selected.key] && ` — ${settings[selected.key].label}`}</span>
+            {grade && <GradeBadge grade={grade} />}
+          </div>
           <div className="fj-sub" style={{ marginTop: 3 }}>{stats.n} trade{stats.n === 1 ? "" : "s"}</div>
         </div>
         {list.length > 1 && (
@@ -4035,6 +4451,8 @@ function DetailView({ selected, trades, settings, strategies, notes, accounts, o
       </div>
 
       <StatGrid stats={stats} />
+
+      {isStrategy && grade && <StrategyGradePanel grade={grade} />}
 
       <ChangeComparisonPanel trades={entityTrades} notes={entityNotes} />
 
@@ -4073,6 +4491,8 @@ function DetailView({ selected, trades, settings, strategies, notes, accounts, o
             <p className="fj-panel-title">Stats by time window</p>
             <WindowStatsPanel trades={entityTrades} />
           </div>
+
+          {isStrategy && <MartingaleDepthPanel trades={entityTrades} />}
 
           {isStrategy && <DailyLossLimitPanel trades={entityTrades} />}
           {isStrategy && <RiskOfRuinPanel trades={entityTrades} />}
