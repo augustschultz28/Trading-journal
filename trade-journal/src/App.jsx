@@ -131,6 +131,157 @@ function tradovateDateTimeAt(entryMs, hourOffset) {
   return { date, time };
 }
 
+// ---------- NinjaTrader import ----------
+//
+// NinjaTrader's "Trades" grid exports one row per FILL (an entry or an exit),
+// not one row per closed position the way Tradovate's export does — so unlike
+// Tradovate, this has to pair fills into round-turns itself. Each fill is
+// explicitly tagged Entry/Exit by NinjaTrader already, which makes pairing
+// straightforward: walk each (instrument, account)'s fills in time order,
+// accumulate entries into an open position, and consume exits against it.
+// Handles scaling in (multiple Entry fills building one position), partial
+// exits (multiple Exit fills closing one position), and a same-fill reversal
+// (an Exit that closes more than the open size, with the remainder opening a
+// new position the other way) — all verified against a real exported file,
+// including checking that a stop-out's P&L matches its point loss × multiplier.
+const NINJATRADER_REQUIRED_HEADERS = ["Instrument", "Action", "Quantity", "Price", "Time", "E/X"];
+
+// "MNQ 12-26" -> "MNQ" (NinjaTrader suffixes the contract month as "MM-YY")
+function parseNinjaTraderSymbolRoot(instrument) {
+  return (instrument || "").trim().split(/\s+/)[0];
+}
+
+// "9/28/2026 6:09:21 PM" -> { date: "2026-09-28", time: "18:09", ms }
+function parseNinjaTraderTimestamp(str) {
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})\s+(\d{1,2}):(\d{2}):(\d{2})\s+(AM|PM)$/i.exec((str || "").trim());
+  if (!m) return null;
+  const [, mo, day, yr, hh12, mm, ss, ap] = m;
+  let hh = Number(hh12) % 12;
+  if (/pm/i.test(ap)) hh += 12;
+  const d = new Date(Number(yr), Number(mo) - 1, Number(day), hh, Number(mm), Number(ss));
+  const date = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const time = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  return { date, time, ms: d.getTime() };
+}
+
+// "$0.00" -> 0, "$(4.50)" -> -4.5 — looser than parseTradovatePnl since
+// commission is never expected to be negative, but handled just in case.
+function parseCurrencyLoose(str) {
+  const s = (str || "").trim();
+  if (!s) return 0;
+  const negative = s.startsWith("$(") || s.startsWith("(") || s.startsWith("-");
+  const num = parseFloat(s.replace(/[$(),]/g, ""));
+  if (Number.isNaN(num)) return 0;
+  return negative ? -Math.abs(num) : num;
+}
+
+// Groups a flat fill list (already sorted ascending by time, already scoped
+// to one instrument+account) into completed round-turn positions.
+function pairNinjaTraderFills(fills) {
+  const completed = [];
+  let open = null;
+  fills.forEach((f) => {
+    const dir = f.action === "Buy" ? "Long" : "Short";
+    if (f.ex === "Entry") {
+      if (!open) {
+        open = { direction: dir, entryFills: [f], exitFills: [], remainingQty: f.qty };
+      } else if (open.direction === dir) {
+        open.entryFills.push(f);
+        open.remainingQty += f.qty;
+      } else {
+        // An Entry fill while a position is open the other way shouldn't
+        // happen in a normal export — treat it as starting fresh rather
+        // than silently corrupting the open position's math.
+        open = { direction: dir, entryFills: [f], exitFills: [], remainingQty: f.qty };
+      }
+    } else if (f.ex === "Exit") {
+      if (!open) return; // orphan exit (position opened before this file's window) — skip
+      const exitDirOk = (open.direction === "Long" && f.action === "Sell") || (open.direction === "Short" && f.action === "Buy");
+      if (!exitDirOk) return;
+      const consumed = Math.min(f.qty, open.remainingQty);
+      open.exitFills.push({ ...f, qty: consumed });
+      open.remainingQty -= consumed;
+      if (open.remainingQty <= 0) {
+        completed.push(open);
+        const leftover = f.qty - consumed;
+        open = leftover > 0 ? { direction: dir, entryFills: [{ ...f, qty: leftover }], exitFills: [], remainingQty: leftover } : null;
+      }
+    }
+  });
+  return completed;
+}
+
+function summarizeNinjaTraderPosition(pos) {
+  const qty = pos.entryFills.reduce((s, f) => s + f.qty, 0);
+  const entryPrice = pos.entryFills.reduce((s, f) => s + f.price * f.qty, 0) / qty;
+  const exitQty = pos.exitFills.reduce((s, f) => s + f.qty, 0);
+  const exitPrice = exitQty ? pos.exitFills.reduce((s, f) => s + f.price * f.qty, 0) / exitQty : null;
+  const entryMs = Math.min(...pos.entryFills.map((f) => f.ms));
+  const exitMs = pos.exitFills.length ? Math.max(...pos.exitFills.map((f) => f.ms)) : null;
+  const commission = [...pos.entryFills, ...pos.exitFills].reduce((s, f) => s + f.commission, 0);
+  const entryNames = Array.from(new Set(pos.entryFills.map((f) => f.name).filter(Boolean)));
+  const exitNames = Array.from(new Set(pos.exitFills.map((f) => f.name).filter(Boolean)));
+  // Order IDs are unique per fill and stable across re-exports, so a sorted
+  // join of every fill's Order ID making up this position is a reliable
+  // fingerprint for de-duping re-imports of the same full-history export.
+  const fingerprint = [...pos.entryFills, ...pos.exitFills]
+    .map((f) => f.orderId)
+    .filter(Boolean)
+    .sort()
+    .join("|");
+  return {
+    root: pos.entryFills[0].root, account: pos.entryFills[0].account,
+    direction: pos.direction, qty, entryPrice, exitPrice, entryMs, exitMs, commission,
+    durationSec: exitMs ? Math.round((exitMs - entryMs) / 1000) : null,
+    entryNames, exitNames, fingerprint,
+  };
+}
+
+// Parses raw Papa-parsed rows into completed positions, grouped by
+// instrument+account so simultaneous positions in different markets (or
+// different sim accounts) don't get paired with each other.
+function parseNinjaTraderRows(rawRows) {
+  const fills = [];
+  let errorCount = 0;
+  rawRows.forEach((row) => {
+    const ts = parseNinjaTraderTimestamp(row["Time"]);
+    const qty = Number(row["Quantity"]);
+    const price = Number(row["Price"]);
+    const ex = (row["E/X"] || "").trim();
+    const action = (row["Action"] || "").trim();
+    if (!ts || !qty || !Number.isFinite(price) || (ex !== "Entry" && ex !== "Exit") || (action !== "Buy" && action !== "Sell")) {
+      errorCount++;
+      return;
+    }
+    fills.push({
+      root: parseNinjaTraderSymbolRoot(row["Instrument"]),
+      action, qty, price, ms: ts.ms, ex,
+      commission: parseCurrencyLoose(row["Commission"]),
+      account: (row["Account display name"] || row["Account name"] || "").trim(),
+      name: (row["Name"] || "").trim(),
+      orderId: (row["Order ID"] || "").trim(),
+    });
+  });
+
+  const groups = {};
+  fills.forEach((f) => {
+    const key = `${f.root}__${f.account}`;
+    (groups[key] = groups[key] || []).push(f);
+  });
+
+  const positions = [];
+  Object.values(groups).forEach((groupFills) => {
+    const sorted = [...groupFills].sort((a, b) => a.ms - b.ms);
+    positions.push(...pairNinjaTraderFills(sorted));
+  });
+
+  const summaries = positions
+    .map(summarizeNinjaTraderPosition)
+    .filter((s) => s.exitMs !== null); // drop any position still open (no matching exit in this file)
+
+  return { summaries, errorCount };
+}
+
 function formatDuration(sec) {
   if (sec === null || sec === undefined || Number.isNaN(sec)) return "—";
   const s = Math.round(sec);
@@ -866,6 +1017,8 @@ export default function TradingJournal() {
   const backupFileInputRef = useRef(null);
   const [tradovateImport, setTradovateImport] = useState(null); // { parsedRows, newMarkets } | { error }
   const tradovateFileInputRef = useRef(null);
+  const [ninjaImport, setNinjaImport] = useState(null); // { parsedRows, newMarkets } | { error }
+  const ninjaFileInputRef = useRef(null);
 
   useEffect(() => {
     (async () => {
@@ -1071,6 +1224,100 @@ export default function TradingJournal() {
       });
     }
     setTradovateImport(null);
+  };
+
+  const triggerNinjaImport = () => ninjaFileInputRef.current?.click();
+
+  const handleNinjaFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        const headerRow = results.meta.fields || [];
+        const looksLikeNinjaTrader = NINJATRADER_REQUIRED_HEADERS.every((h) => headerRow.includes(h));
+        if (!looksLikeNinjaTrader) {
+          setNinjaImport({ error: "This doesn't look like a NinjaTrader Trades export — expected columns like Instrument, Action, Quantity, Price, Time, E/X weren't found. Make sure you exported the Trades grid, not Accounts." });
+          return;
+        }
+        const { summaries: allSummaries, errorCount } = parseNinjaTraderRows(results.data);
+        if (allSummaries.length === 0) {
+          setNinjaImport({ error: `Couldn't find any completed round-turn trades in this file${errorCount ? ` (${errorCount} row${errorCount === 1 ? "" : "s"} failed to parse)` : ""}. Every trade needs both an Entry and a matching Exit fill in the export.` });
+          return;
+        }
+
+        // NinjaTrader always exports the full history rather than a
+        // date-filtered range, so re-uploading the same file (or a fresh
+        // export that overlaps an old one) is the normal workflow. Skip
+        // any position whose fingerprint (its fills' Order IDs) matches a
+        // trade already sitting in the journal.
+        const alreadyImported = new Set(
+          trades.map((t) => t._ntFingerprint).filter(Boolean)
+        );
+        const summaries = allSummaries.filter((s) => !s.fingerprint || !alreadyImported.has(s.fingerprint));
+        const skippedCount = allSummaries.length - summaries.length;
+
+        if (summaries.length === 0) {
+          setNinjaImport({ error: `Every completed trade in this file (${allSummaries.length}) has already been imported — nothing new to add. You can safely re-export and re-upload your full history any time; only new trades get pulled in.` });
+          return;
+        }
+
+        const existingSymbols = new Set(Object.keys(settings));
+        const newSymbols = Array.from(new Set(summaries.map((s) => s.root).filter((r) => !existingSymbols.has(r))));
+        const newMarkets = newSymbols.map((symbol) => ({ symbol, ...guessMarketDefaults(symbol) }));
+        const multiplierFor = (root) => settings[root]?.multiplier ?? newMarkets.find((m) => m.symbol === root)?.multiplier ?? 1;
+
+        const parsedRows = summaries.map((s) => {
+          const multiplier = multiplierFor(s.root);
+          const dirSign = s.direction === "Long" ? 1 : -1;
+          const pnl = Number((((s.exitPrice - s.entryPrice) * multiplier * s.qty * dirSign) - s.commission).toFixed(2));
+          return {
+            _entryMs: s.entryMs,
+            _fingerprint: s.fingerprint,
+            durationSec: s.durationSec,
+            market: s.root,
+            direction: s.direction,
+            contracts: s.qty,
+            entry: s.entryPrice,
+            exit: s.exitPrice,
+            fees: Number(s.commission.toFixed(2)),
+            pnl,
+            notes: [s.entryNames.join("/"), s.exitNames.join("/")].filter(Boolean).join(" → "),
+            strategy: "",
+            accounts: [],
+          };
+        });
+        setNinjaImport({ parsedRows, newMarkets, skippedCount });
+      },
+    });
+    e.target.value = "";
+  };
+
+  const confirmNinjaImport = (finalRows) => {
+    if (!ninjaImport || ninjaImport.error) return;
+    const newTrades = finalRows.map((r) => ({
+      id: uid(),
+      date: r.date, time: r.time, market: r.market, strategy: r.strategy,
+      accounts: r.accounts, direction: r.direction, contracts: r.contracts,
+      entry: r.entry, exit: r.exit, fees: r.fees, pnl: r.pnl, notes: r.notes,
+      durationSec: r.durationSec,
+      _ntFingerprint: r._fingerprint || undefined,
+    }));
+    setTrades((prev) => [...prev, ...newTrades]);
+    if (ninjaImport.newMarkets.length > 0) {
+      setSettings((prev) => {
+        const next = { ...prev };
+        ninjaImport.newMarkets.forEach((m) => {
+          if (!next[m.symbol]) {
+            const accent = ACCENT_PALETTE[Object.keys(next).length % ACCENT_PALETTE.length];
+            next[m.symbol] = { label: m.label, multiplier: m.multiplier, accent, category: m.category };
+          }
+        });
+        return next;
+      });
+    }
+    setNinjaImport(null);
   };
 
   const handleBackup = () => {
@@ -1331,6 +1578,7 @@ export default function TradingJournal() {
         onExport={handleExport}
         onImportClick={triggerImport}
         onTradovateImportClick={triggerTradovateImport}
+        onNinjaTraderImportClick={triggerNinjaImport}
         onBackup={handleBackup}
         onRestoreClick={triggerRestore}
       />
@@ -1349,6 +1597,14 @@ export default function TradingJournal() {
         accept=".csv,text/csv"
         style={{ display: "none" }}
         onChange={handleTradovateFileChange}
+      />
+
+      <input
+        ref={ninjaFileInputRef}
+        type="file"
+        accept=".csv,text/csv"
+        style={{ display: "none" }}
+        onChange={handleNinjaFileChange}
       />
 
       <input
@@ -1390,6 +1646,33 @@ export default function TradingJournal() {
             <div className="fj-loss" style={{ fontSize: 13, marginBottom: 16 }}>{tradovateImport.error}</div>
             <div style={{ display: "flex", justifyContent: "flex-end" }}>
               <button className="fj-btn" onClick={() => setTradovateImport(null)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {ninjaImport && !ninjaImport.error && (
+        <NinjaTraderImportModal
+          parsedRows={ninjaImport.parsedRows}
+          newMarkets={ninjaImport.newMarkets}
+          skippedCount={ninjaImport.skippedCount}
+          strategies={strategies}
+          accounts={accounts}
+          onConfirm={confirmNinjaImport}
+          onCancel={() => setNinjaImport(null)}
+        />
+      )}
+
+      {ninjaImport && ninjaImport.error && (
+        <div className="fj-modal-backdrop" onClick={() => setNinjaImport(null)}>
+          <div className="fj-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 440 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+              <p className="fj-panel-title" style={{ margin: 0 }}>Couldn't import this file</p>
+              <button className="fj-iconbtn" onClick={() => setNinjaImport(null)}><X size={18} /></button>
+            </div>
+            <div className="fj-loss" style={{ fontSize: 13, marginBottom: 16 }}>{ninjaImport.error}</div>
+            <div style={{ display: "flex", justifyContent: "flex-end" }}>
+              <button className="fj-btn" onClick={() => setNinjaImport(null)}>Close</button>
             </div>
           </div>
         </div>
@@ -1503,7 +1786,7 @@ export default function TradingJournal() {
 
 // ---------- header ----------
 
-function Header({ onAdd, onBulkAdd, onSettings, onExport, onImportClick, onTradovateImportClick, onBackup, onRestoreClick }) {
+function Header({ onAdd, onBulkAdd, onSettings, onExport, onImportClick, onTradovateImportClick, onNinjaTraderImportClick, onBackup, onRestoreClick }) {
   return (
     <div className="fj-header">
       <div>
@@ -1514,6 +1797,7 @@ function Header({ onAdd, onBulkAdd, onSettings, onExport, onImportClick, onTrado
         <button className="fj-btn" onClick={onSettings}><Settings2 size={14} /> Contract settings</button>
         <button className="fj-btn" onClick={onImportClick}><Upload size={14} /> Import CSV</button>
         <button className="fj-btn" onClick={onTradovateImportClick} title="Import a Tradovate Performance export and tag each trade before saving"><Upload size={14} /> Import Tradovate CSV</button>
+        <button className="fj-btn" onClick={onNinjaTraderImportClick} title="Import a NinjaTrader Trades export and tag each trade before saving"><Upload size={14} /> Import NinjaTrader CSV</button>
         <button className="fj-btn" onClick={onExport}><Download size={14} /> Export CSV</button>
         <button className="fj-btn" onClick={onRestoreClick} title="Restore trades, accounts, and settings from a backup file"><Upload size={14} /> Restore backup</button>
         <button className="fj-btn" onClick={onBackup} title="Download everything — trades, accounts, settings — as one file"><Download size={14} /> Backup all data</button>
@@ -1923,6 +2207,159 @@ function TradovateImportModal({ parsedRows, newMarkets, strategies, accounts, on
                     <input
                       className="fj-input" style={{ fontFamily: "Inter, sans-serif", width: 150, fontSize: 12 }}
                       list="tradovate-strategy-list" placeholder="—"
+                      value={r.strategy} onChange={(e) => updateRow(r._id, { strategy: e.target.value })}
+                    />
+                  </td>
+                  <td>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 3, maxWidth: 160 }}>
+                      {accounts.length === 0 && <span className="fj-sub">—</span>}
+                      {accounts.map((a) => (
+                        <span
+                          key={a.id} className="fj-chip" style={{ fontSize: 10, padding: "2px 7px", ...(r.accounts.includes(a.name) ? { background: "var(--amber)", borderColor: "var(--amber)", color: "#1B1E24", fontWeight: 600 } : {}) }}
+                          onClick={() => toggleRowAccount(r._id, a.name)}
+                        >
+                          {a.name}
+                        </span>
+                      ))}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end", marginTop: 14 }}>
+          <button className="fj-btn" onClick={onCancel}>Cancel</button>
+          <button
+            className="fj-btn primary" disabled={selected.size === 0}
+            onClick={() => onConfirm(rowsWithTime.filter((r) => selected.has(r._id)))}
+          >
+            Import {selected.size} trade{selected.size === 1 ? "" : "s"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function NinjaTraderImportModal({ parsedRows, newMarkets, skippedCount, strategies, accounts, onConfirm, onCancel }) {
+  const [rows, setRows] = useState(() => parsedRows.map((r) => ({ ...r, _id: uid() })));
+  const [selected, setSelected] = useState(() => new Set(rows.map((r) => r._id)));
+  const [bulkStrategy, setBulkStrategy] = useState("");
+  const [bulkAccounts, setBulkAccounts] = useState([]);
+
+  const allSelected = selected.size > 0 && selected.size === rows.length;
+  const toggleAll = () => setSelected(allSelected ? new Set() : new Set(rows.map((r) => r._id)));
+  const toggleOne = (id) => setSelected((prev) => {
+    const next = new Set(prev);
+    next.has(id) ? next.delete(id) : next.add(id);
+    return next;
+  });
+
+  const updateRow = (id, patch) => setRows((prev) => prev.map((r) => r._id === id ? { ...r, ...patch } : r));
+  const toggleRowAccount = (id, name) => setRows((prev) => prev.map((r) => {
+    if (r._id !== id) return r;
+    const has = r.accounts.includes(name);
+    return { ...r, accounts: has ? r.accounts.filter((a) => a !== name) : [...r.accounts, name] };
+  }));
+  const toggleBulkAccount = (name) => setBulkAccounts((prev) => prev.includes(name) ? prev.filter((a) => a !== name) : [...prev, name]);
+
+  const applyBulk = () => {
+    if (selected.size === 0) return;
+    setRows((prev) => prev.map((r) => selected.has(r._id)
+      ? { ...r, strategy: bulkStrategy.trim() || r.strategy, accounts: bulkAccounts.length ? bulkAccounts : r.accounts }
+      : r
+    ));
+  };
+
+  // NinjaTrader timestamps come straight from the machine it ran on, so
+  // unlike Tradovate's export there's no known VPS offset to correct for.
+  const rowsWithTime = useMemo(
+    () => rows.map((r) => ({ ...r, ...tradovateDateTimeAt(r._entryMs, 0) })),
+    [rows]
+  );
+
+  const untaggedCount = rows.filter((r) => !r.strategy).length;
+  const totalPnl = rows.reduce((s, r) => s + r.pnl, 0);
+  const selectedPnl = rows.filter((r) => selected.has(r._id)).reduce((s, r) => s + r.pnl, 0);
+
+  return (
+    <div className="fj-modal-backdrop" onClick={onCancel}>
+      <div className="fj-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 1020 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+          <div>
+            <p className="fj-panel-title" style={{ margin: 0 }}>Tag NinjaTrader trades before importing</p>
+            <div className="fj-sub" style={{ marginTop: 3 }}>
+              {rows.length} trade{rows.length === 1 ? "" : "s"} parsed · net {money(totalPnl)} · <b style={{ color: "#E7E5E0" }}>{selected.size} selected</b> for import (net {money(selectedPnl)}){untaggedCount > 0 ? ` · ${untaggedCount} still untagged` : ""}
+            </div>
+          </div>
+          <button className="fj-iconbtn" onClick={onCancel}><X size={18} /></button>
+        </div>
+
+        {skippedCount > 0 && (
+          <div className="fj-sub" style={{ marginBottom: 12, padding: "8px 10px", background: "var(--panel-alt)", borderRadius: 8, border: "1px solid var(--border)" }}>
+            {skippedCount} trade{skippedCount === 1 ? "" : "s"} in this file {skippedCount === 1 ? "was" : "were"} already imported and skipped automatically — only new trades are shown below.
+          </div>
+        )}
+
+        {newMarkets.length > 0 && (
+          <div className="fj-sub" style={{ marginBottom: 12, padding: "8px 10px", background: "var(--panel-alt)", borderRadius: 8, border: "1px solid var(--border)" }}>
+            New market{newMarkets.length === 1 ? "" : "s"} detected: <b style={{ color: "#E7E5E0" }}>{newMarkets.map((m) => m.symbol).join(", ")}</b> — added to Contract Settings automatically.
+            {newMarkets.some((m) => !m.verified) && " Double-check the $/point value for any unfamiliar symbol — I only pre-filled it confidently for a few common contracts."}
+          </div>
+        )}
+
+        <div className="fj-sub" style={{ marginBottom: 8 }}>
+          Select trades below, then set a strategy and/or accounts to apply to all of them at once — much faster than tagging one at a time.
+        </div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 14, padding: "10px 12px", background: "var(--panel-alt)", borderRadius: 10, border: "1px solid var(--border)" }}>
+          <input
+            className="fj-input" style={{ fontFamily: "Inter, sans-serif", width: 200 }}
+            list="ninjatrader-strategy-list" placeholder="Strategy for selected…"
+            value={bulkStrategy} onChange={(e) => setBulkStrategy(e.target.value)}
+          />
+          <datalist id="ninjatrader-strategy-list">
+            {strategies.map((s) => <option key={s} value={s} />)}
+          </datalist>
+          {accounts.map((a) => (
+            <span key={a.id} className={`fj-chip ${bulkAccounts.includes(a.name) ? "active" : ""}`} onClick={() => toggleBulkAccount(a.name)}>
+              {a.name}
+            </span>
+          ))}
+          <button type="button" className="fj-btn primary" style={{ marginLeft: "auto" }} disabled={selected.size === 0} onClick={applyBulk}>
+            Apply to {selected.size} selected
+          </button>
+        </div>
+
+        <div style={{ overflowX: "auto", maxHeight: "45vh", overflowY: "auto", border: "1px solid var(--border)", borderRadius: 10 }}>
+          <table className="fj-table">
+            <thead>
+              <tr>
+                <th><input type="checkbox" checked={allSelected} onChange={toggleAll} /></th>
+                <th>Date</th><th>Time</th><th>Mkt</th><th>Dir</th><th>Qty</th>
+                <th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Dur.</th>
+                <th>Strategy</th><th>Accounts</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rowsWithTime.map((r) => (
+                <tr key={r._id}>
+                  <td><input type="checkbox" checked={selected.has(r._id)} onChange={() => toggleOne(r._id)} /></td>
+                  <td>{r.date}</td>
+                  <td>{r.time}</td>
+                  <td>{r.market}</td>
+                  <td className={r.direction === "Short" ? "fj-loss" : "fj-profit"}>{r.direction}</td>
+                  <td>{r.contracts}</td>
+                  <td>{r.entry}</td>
+                  <td>{r.exit}</td>
+                  <td className={r.pnl >= 0 ? "fj-profit" : "fj-loss"}>{money(r.pnl)}</td>
+                  <td>{formatDuration(r.durationSec)}</td>
+                  <td>
+                    <input
+                      className="fj-input" style={{ fontFamily: "Inter, sans-serif", width: 150, fontSize: 12 }}
+                      list="ninjatrader-strategy-list" placeholder="—"
                       value={r.strategy} onChange={(e) => updateRow(r._id, { strategy: e.target.value })}
                     />
                   </td>
