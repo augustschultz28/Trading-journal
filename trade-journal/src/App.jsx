@@ -896,7 +896,10 @@ function buildMultiEquityCurve(trades, strategyList) {
 // after that point they behave like a static floor.
 
 function buildAccountBalanceTimeline(account, trades) {
-  const taggedTrades = trades.filter((t) => (t.accounts || []).includes(account.name));
+  // Excludes copied trades ("Copy to strategy" in the Trade Log) — a copy
+  // defaults to the same account(s) as its original, and it isn't a second
+  // real fill, so it must never move a real account's balance or drawdown.
+  const taggedTrades = trades.filter((t) => !t._isCopy && (t.accounts || []).includes(account.name));
   const byDate = {};
   taggedTrades.forEach((t) => { byDate[t.date] = (byDate[t.date] || 0) + t.pnl; });
 
@@ -930,7 +933,7 @@ function buildAccountBalanceTimeline(account, trades) {
 // isolated deliberately so the trailing-drawdown floor calc isn't affected
 // by withdrawals or corrections.
 function buildAccountEquityCurve(account, trades) {
-  const taggedTrades = trades.filter((t) => (t.accounts || []).includes(account.name));
+  const taggedTrades = trades.filter((t) => !t._isCopy && (t.accounts || []).includes(account.name));
   const events = [
     ...taggedTrades.map((t) => ({ date: t.date, time: t.time || "00:00", amount: t.pnl })),
     ...(account.payouts || []).map((p) => ({ date: p.date, time: "00:00", amount: -p.amount })),
@@ -1071,6 +1074,21 @@ export default function TradingJournal() {
   const handleBulkUpdate = (ids, patch) => {
     const idSet = new Set(ids);
     setTrades((prev) => prev.map((t) => (idSet.has(t.id) ? { ...t, ...patch } : t)));
+  };
+
+  // Duplicates a set of trades into a new strategy (and/or account), leaving
+  // the originals untouched — e.g. keep M1 NQ trades in their original
+  // strategy but also see them, unmixed with anything before the change,
+  // under a new strategy name after tweaking the rules. Copies are tagged
+  // with _isCopy so every portfolio-wide total (overall stats, market
+  // totals, account balances/drawdown) counts the underlying trade once —
+  // only that trade's own strategy page counts the copy.
+  const handleBulkCopy = (ids, patch) => {
+    const idSet = new Set(ids);
+    setTrades((prev) => {
+      const copies = prev.filter((t) => idSet.has(t.id)).map((t) => ({ ...t, ...patch, id: uid(), _isCopy: true, _copiedFrom: t.id }));
+      return [...prev, ...copies];
+    });
   };
 
   const addNote = (note) => setNotes((prev) => [...prev, { ...note, id: uid() }]);
@@ -1724,6 +1742,7 @@ export default function TradingJournal() {
             onEdit={startEdit}
             onDelete={handleDelete}
             onBulkUpdate={handleBulkUpdate}
+            onBulkCopy={handleBulkCopy}
           />
         ) : (
           <HomeView
@@ -1743,7 +1762,7 @@ export default function TradingJournal() {
         <AccountsView accounts={accounts} setAccounts={setAccounts} trades={trades} setTrades={setTrades} />
       )}
       {view === "log" && (
-        <TradeLogView trades={trades} strategies={strategies} accounts={accounts} settings={settings} onEdit={startEdit} onDelete={handleDelete} onBulkUpdate={handleBulkUpdate} />
+        <TradeLogView trades={trades} strategies={strategies} accounts={accounts} settings={settings} onEdit={startEdit} onDelete={handleDelete} onBulkUpdate={handleBulkUpdate} onBulkCopy={handleBulkCopy} />
       )}
       {view === "timeline" && (
         <TimelineView
@@ -2591,7 +2610,7 @@ function FilterBar({ settings, strategies, accounts, filterMarkets, filterStrate
 
 // ---------- trade log (with its own local filters — not shared across tabs) ----------
 
-function TradeLogView({ trades, strategies, accounts, settings, onEdit, onDelete, onBulkUpdate }) {
+function TradeLogView({ trades, strategies, accounts, settings, onEdit, onDelete, onBulkUpdate, onBulkCopy }) {
   const [filterMarkets, setFilterMarkets] = useState([]);
   const [filterStrategies, setFilterStrategies] = useState([]);
   const [filterAccounts, setFilterAccounts] = useState([]);
@@ -2621,7 +2640,7 @@ function TradeLogView({ trades, strategies, accounts, settings, onEdit, onDelete
         dateFrom={dateFrom} dateTo={dateTo} setDateFrom={setDateFrom} setDateTo={setDateTo}
         onReset={resetFilters}
       />
-      <TradeLog trades={filtered} strategies={strategies} accounts={accounts} onEdit={onEdit} onDelete={onDelete} onBulkUpdate={onBulkUpdate} />
+      <TradeLog trades={filtered} strategies={strategies} accounts={accounts} onEdit={onEdit} onDelete={onDelete} onBulkUpdate={onBulkUpdate} onBulkCopy={onBulkCopy} />
     </div>
   );
 }
@@ -3111,20 +3130,36 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
   const hasMicro = Object.values(settings).some((m) => (m.category || "micro") === "micro");
   const hasMini = Object.values(settings).some((m) => m.category === "mini");
 
-  // Category-only scope — drives the market row and strategy grid, so every
-  // strategy/market stays visible to browse and toggle even while filtered.
+  // Category-only scope — drives the market row and the portfolio-wide stat
+  // grid, so every strategy/market stays visible to browse and toggle even
+  // while filtered. Copied trades (from "Copy to strategy" in the Trade Log)
+  // are excluded here on purpose: a copy is the same underlying trade viewed
+  // under a second strategy name, not a new position, so the real portfolio
+  // total must never count it twice.
   const categoryScopedTrades = useMemo(() => {
+    const real = trades.filter((t) => !t._isCopy);
+    if (category === "all") return real;
+    return real.filter((t) => (settings[t.market]?.category || "micro") === category);
+  }, [trades, settings, category]);
+
+  // Same category scope, but keeping copies in — needed only for the
+  // per-strategy breakdown below, where a copy legitimately belongs under
+  // its new strategy's own numbers.
+  const categoryScopedTradesWithCopies = useMemo(() => {
     if (category === "all") return trades;
     return trades.filter((t) => (settings[t.market]?.category || "micro") === category);
   }, [trades, settings, category]);
 
   // Category + selected-strategy scope — drives the stat grid and the main
   // equity curve, so picking strategy chips actually narrows the numbers,
-  // not just overlays extra lines on top of the unfiltered portfolio.
+  // not just overlays extra lines on top of the unfiltered portfolio. With
+  // no strategy chips picked, this is the real (copy-free) portfolio total;
+  // picking specific strategy chips brings copies back in for just those
+  // strategies, since a copy only ever counts once there.
   const statsScopedTrades = useMemo(() => {
     if (selectedStrategies.length === 0) return categoryScopedTrades;
-    return categoryScopedTrades.filter((t) => selectedStrategies.includes(t.strategy));
-  }, [categoryScopedTrades, selectedStrategies]);
+    return categoryScopedTradesWithCopies.filter((t) => selectedStrategies.includes(t.strategy));
+  }, [categoryScopedTrades, categoryScopedTradesWithCopies, selectedStrategies]);
 
   const stats = useMemo(() => calcStats(statsScopedTrades), [statsScopedTrades]);
   const multiCurve = useMemo(() => buildMultiEquityCurve(statsScopedTrades, strategies), [statsScopedTrades, strategies]);
@@ -3142,14 +3177,14 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
   }, [settings, categoryScopedTrades, category, marketSort]);
 
   const byStrategy = useMemo(() => {
-    const names = Array.from(new Set(categoryScopedTrades.map((t) => t.strategy).filter(Boolean)));
+    const names = Array.from(new Set(categoryScopedTradesWithCopies.map((t) => t.strategy).filter(Boolean)));
     const list = names
       .map((s) => {
-        const stratTrades = categoryScopedTrades.filter((t) => t.strategy === s);
+        const stratTrades = categoryScopedTradesWithCopies.filter((t) => t.strategy === s);
         return { key: s, stats: calcStats(stratTrades), curve: equityCurve(stratTrades), grade: computeStrategyGrade(stratTrades) };
       });
     return sortGroups(list, strategySort);
-  }, [categoryScopedTrades, strategySort]);
+  }, [categoryScopedTradesWithCopies, strategySort]);
 
   const acctRollup = useMemo(() => {
     if (accounts.length === 0) return null;
@@ -3914,11 +3949,14 @@ function NoteRow({ note, onEdit, onDelete, colSpan }) {
   );
 }
 
-function TradeLog({ trades, notes, strategies, settings, accounts, editingNoteId, onEditNote, onSaveNoteEdit, onCancelNoteEdit, onDeleteNote, onEdit, onDelete, onBulkUpdate }) {
+function TradeLog({ trades, notes, strategies, settings, accounts, editingNoteId, onEditNote, onSaveNoteEdit, onCancelNoteEdit, onDeleteNote, onEdit, onDelete, onBulkUpdate, onBulkCopy }) {
   const [bulkMode, setBulkMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState(new Set());
   const [bulkStrategy, setBulkStrategy] = useState("");
   const [bulkAccounts, setBulkAccounts] = useState([]);
+  const [copyStrategy, setCopyStrategy] = useState("");
+  const [copyAccounts, setCopyAccounts] = useState([]);
+  const [copyDone, setCopyDone] = useState(0);
 
   const combined = useMemo(() => {
     const tradeRows = trades.map((t) => ({ _kind: "trade", data: t, date: t.date, time: t.time || "00:00" }));
@@ -3934,6 +3972,9 @@ function TradeLog({ trades, notes, strategies, settings, accounts, editingNoteId
     setSelectedIds(new Set());
     setBulkStrategy("");
     setBulkAccounts([]);
+    setCopyStrategy("");
+    setCopyAccounts([]);
+    setCopyDone(0);
   };
 
   const toggleSelect = (id) => {
@@ -3959,6 +4000,24 @@ function TradeLog({ trades, notes, strategies, settings, accounts, editingNoteId
     setSelectedIds(new Set());
     setBulkStrategy("");
     setBulkAccounts([]);
+  };
+
+  const toggleCopyAccount = (name) =>
+    setCopyAccounts((prev) => (prev.includes(name) ? prev.filter((a) => a !== name) : [...prev, name]));
+
+  // Duplicates the selected trades into a new strategy, leaving the
+  // originals exactly as they are — so a strategy's history before a rule
+  // change stays intact while the same trades also appear, unmixed with
+  // anything logged before, under the new strategy.
+  const applyCopy = () => {
+    if (!onBulkCopy || selectedIds.size === 0 || !copyStrategy.trim()) return;
+    const patch = { strategy: copyStrategy.trim() };
+    if (copyAccounts.length) patch.accounts = copyAccounts;
+    onBulkCopy(Array.from(selectedIds), patch);
+    setCopyDone(selectedIds.size);
+    setSelectedIds(new Set());
+    setCopyStrategy("");
+    setCopyAccounts([]);
   };
 
   if (combined.length === 0) return <div className="fj-empty">No trades match the current filters.</div>;
@@ -4020,6 +4079,53 @@ function TradeLog({ trades, notes, strategies, settings, accounts, editingNoteId
         </div>
       )}
 
+      {bulkMode && onBulkCopy && (
+        <div className="fj-panel" style={{ background: "rgba(108,147,173,0.08)", borderColor: "var(--accent-blue, #6C93AD)", marginBottom: 12 }}>
+          <div className="fj-sub" style={{ marginBottom: 10 }}>
+            Or <b style={{ color: "#E7E5E0" }}>copy</b> the checked trades into a new strategy instead — the originals stay exactly where they are, untouched, and the copies show up as fresh trades under the new name. Copies are excluded from the portfolio's overall totals and account balances (they're the same underlying trade, not new money) — they only count toward the new strategy's own numbers.
+          </div>
+          <div className="fj-form-row" style={{ gridTemplateColumns: "1fr 1fr auto", alignItems: "end", gap: 10 }}>
+            <div className="fj-form-field">
+              <label>Copy to strategy</label>
+              <input
+                list="fj-bulk-strategy-options"
+                className="fj-input"
+                value={copyStrategy}
+                onChange={(e) => setCopyStrategy(e.target.value)}
+                placeholder="New or existing strategy name…"
+              />
+            </div>
+            <div className="fj-form-field">
+              <label>Account(s) for copies <span className="fj-sub" style={{ fontWeight: 400 }}>(optional — keeps original if blank)</span></label>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                {(accounts || []).map((a) => (
+                  <span
+                    key={a.id}
+                    className={`fj-chip ${copyAccounts.includes(a.name) ? "active" : ""}`}
+                    onClick={() => toggleCopyAccount(a.name)}
+                  >
+                    {a.name}
+                  </span>
+                ))}
+                {(!accounts || accounts.length === 0) && <span className="fj-sub">No accounts set up.</span>}
+              </div>
+            </div>
+            <button
+              className="fj-btn primary"
+              disabled={selectedIds.size === 0 || !copyStrategy.trim()}
+              onClick={applyCopy}
+            >
+              Copy {selectedIds.size} to "{copyStrategy.trim() || "…"}"
+            </button>
+          </div>
+          {copyDone > 0 && (
+            <div className="fj-sub" style={{ marginTop: 10, color: "#8FBF98" }}>
+              Copied {copyDone} trade{copyDone === 1 ? "" : "s"} — the originals are untouched and still under their old strategy.
+            </div>
+          )}
+        </div>
+      )}
+
       <table className="fj-table">
         <thead>
           <tr>
@@ -4060,7 +4166,14 @@ function TradeLog({ trades, notes, strategies, settings, accounts, editingNoteId
                 <td>{t.date}</td>
                 <td>{t.time || "—"}</td>
                 <td>{t.market}</td>
-                <td style={{ fontFamily: "Inter, sans-serif" }}>{t.strategy || "—"}</td>
+                <td style={{ fontFamily: "Inter, sans-serif" }}>
+                  {t.strategy || "—"}
+                  {t._isCopy && (
+                    <span style={{ marginLeft: 5, fontSize: 10, border: "1px solid #6C93AD", borderRadius: 4, padding: "1px 4px", color: "#8FB4D1", background: "rgba(108,147,173,0.12)" }} title="Copied from another strategy — excluded from portfolio totals and account balances so it isn't double-counted">
+                      copy
+                    </span>
+                  )}
+                </td>
                 <td style={{ fontFamily: "Inter, sans-serif", color: "#8B929E" }}>{(t.accounts && t.accounts.length) ? t.accounts.join(", ") : "—"}</td>
                 <td className={t.direction === "Short" ? "fj-loss" : "fj-profit"}>{t.direction}</td>
                 <td>{t.contracts}</td>
@@ -4815,7 +4928,7 @@ function ChangeComparisonPanel({ trades, notes }) {
   );
 }
 
-function DetailView({ selected, trades, settings, strategies, notes, accounts, onAddNote, onUpdateNote, onDeleteNote, onBack, onNavigate, onEdit, onDelete, onBulkUpdate }) {
+function DetailView({ selected, trades, settings, strategies, notes, accounts, onAddNote, onUpdateNote, onDeleteNote, onBack, onNavigate, onEdit, onDelete, onBulkUpdate, onBulkCopy }) {
   const isStrategy = selected.type === "strategy";
   const list = isStrategy ? strategies : Object.keys(settings);
   const idx = list.indexOf(selected.key);
@@ -4831,7 +4944,12 @@ function DetailView({ selected, trades, settings, strategies, notes, accounts, o
   );
 
   const entityTrades = useMemo(
-    () => trades.filter((t) => isStrategy ? t.strategy === selected.key : t.market === selected.key),
+    () => trades.filter((t) => isStrategy
+      ? t.strategy === selected.key
+      // A copy keeps its original market, so without this it would show up
+      // twice in that market's totals (once as itself, once as the copy).
+      : t.market === selected.key && !t._isCopy
+    ),
     [trades, isStrategy, selected.key]
   );
   const stats = useMemo(() => calcStats(entityTrades), [entityTrades]);
@@ -4947,6 +5065,7 @@ function DetailView({ selected, trades, settings, strategies, notes, accounts, o
               onDeleteNote={onDeleteNote}
               onEdit={onEdit} onDelete={onDelete}
               onBulkUpdate={onBulkUpdate}
+              onBulkCopy={onBulkCopy}
             />
           </div>
         </>
