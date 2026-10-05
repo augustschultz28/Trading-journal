@@ -4,7 +4,7 @@ import {
   ResponsiveContainer, BarChart, Bar, ReferenceLine, ScatterChart, Scatter, Cell,
   Area, ComposedChart, ErrorBar
 } from "recharts";
-import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, RotateCcw, Settings2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, ArrowLeft, Upload, Download } from "lucide-react";
+import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, RotateCcw, Settings2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, ArrowLeft, Upload, Download, Sun, Moon } from "lucide-react";
 import Papa from "papaparse";
 
 // ---------- constants ----------
@@ -21,6 +21,7 @@ const TRADES_KEY = "futures_journal_trades_v1";
 const SETTINGS_KEY = "futures_journal_settings_v1";
 const ACCOUNTS_KEY = "futures_journal_accounts_v1";
 const NOTES_KEY = "futures_journal_notes_v1";
+const THEME_KEY = "futures_journal_theme_v1";
 
 const uid = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 
@@ -596,7 +597,7 @@ const GRADE_COLORS = {
 
 function GradeBadge({ grade, size = "md" }) {
   if (!grade) return null;
-  const color = GRADE_COLORS[grade.grade] || "#8B929E";
+  const color = GRADE_COLORS[grade.grade] || "var(--text-dim)";
   const dims = size === "sm" ? { w: 22, h: 22, fs: 12 } : { w: 30, h: 30, fs: 15 };
   return (
     <span
@@ -615,7 +616,7 @@ function GradeBadge({ grade, size = "md" }) {
 }
 
 function StrategyGradePanel({ grade }) {
-  const color = GRADE_COLORS[grade.grade] || "#8B929E";
+  const color = GRADE_COLORS[grade.grade] || "var(--text-dim)";
   const gradeName = { A: "Confirmed edge, strong", B: "Confirmed edge, moderate", C: "Inconclusive — leaning positive", D: "Inconclusive — leaning negative", F: "Confirmed negative edge" }[grade.grade] || "";
 
   return (
@@ -640,7 +641,7 @@ function StrategyGradePanel({ grade }) {
           {grade.grade}
         </span>
         <div>
-          <div style={{ fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 14, color: "#E7E5E0" }}>{gradeName}</div>
+          <div style={{ fontFamily: "Inter, sans-serif", fontWeight: 600, fontSize: 14, color: "var(--text-bright)" }}>{gradeName}</div>
           <div className="fj-sub" style={{ marginTop: 2 }}>
             {money(grade.mean)}/contract expectancy · 95% CI {money(grade.ciLower)} to {money(grade.ciUpper)}
           </div>
@@ -1022,19 +1023,22 @@ export default function TradingJournal() {
   const tradovateFileInputRef = useRef(null);
   const [ninjaImport, setNinjaImport] = useState(null); // { parsedRows, newMarkets } | { error }
   const ninjaFileInputRef = useRef(null);
+  const [theme, setTheme] = useState("dark"); // "dark" | "light"
 
   useEffect(() => {
     (async () => {
-      const [t, s, a, n] = await Promise.all([
+      const [t, s, a, n, th] = await Promise.all([
         loadJSON(TRADES_KEY, []),
         loadJSON(SETTINGS_KEY, DEFAULT_SETTINGS),
         loadJSON(ACCOUNTS_KEY, []),
         loadJSON(NOTES_KEY, []),
+        loadJSON(THEME_KEY, "dark"),
       ]);
       setTrades(t);
       setSettings({ ...DEFAULT_SETTINGS, ...s });
       setAccounts(a);
       setNotes(n);
+      setTheme(th === "light" ? "light" : "dark");
       setReady(true);
     })();
   }, []);
@@ -1043,6 +1047,7 @@ export default function TradingJournal() {
   useEffect(() => { if (ready) saveJSON(SETTINGS_KEY, settings); }, [settings, ready]);
   useEffect(() => { if (ready) saveJSON(ACCOUNTS_KEY, accounts); }, [accounts, ready]);
   useEffect(() => { if (ready) saveJSON(NOTES_KEY, notes); }, [notes, ready]);
+  useEffect(() => { if (ready) saveJSON(THEME_KEY, theme); }, [theme, ready]);
 
   const strategies = useMemo(
     () => Array.from(new Set(trades.map((t) => t.strategy).filter(Boolean))).sort(),
@@ -1408,7 +1413,7 @@ export default function TradingJournal() {
   const editingTrade = editingId ? trades.find((t) => t.id === editingId) : null;
 
   return (
-    <div className="fj-root">
+    <div className="fj-root" data-theme={theme}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
 
@@ -1418,6 +1423,7 @@ export default function TradingJournal() {
           --panel-alt: #21252D;
           --border: #2B303A;
           --text: #E7E5E0;
+          --text-bright: #E7E5E0;
           --text-dim: #8B929E;
           --amber: #D9A441;
           --profit: #5FA37A;
@@ -1428,6 +1434,18 @@ export default function TradingJournal() {
           border-radius: 10px;
           padding: 20px;
           min-height: 100%;
+        }
+        .fj-root[data-theme="light"] {
+          --bg: #F4EEE1;
+          --panel: #FFFDF8;
+          --panel-alt: #EDE4D2;
+          --border: #D9CBA9;
+          --text: #3A3025;
+          --text-bright: #241D14;
+          --text-dim: #8A7A5F;
+          --amber: #B8842E;
+          --profit: #3F8B5D;
+          --loss: #B33E22;
         }
         .fj-root * { box-sizing: border-box; }
         .fj-mono { font-family: 'JetBrains Mono', monospace; }
@@ -1599,6 +1617,8 @@ export default function TradingJournal() {
         onNinjaTraderImportClick={triggerNinjaImport}
         onBackup={handleBackup}
         onRestoreClick={triggerRestore}
+        theme={theme}
+        onToggleTheme={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
       />
 
       <input
@@ -1805,7 +1825,7 @@ export default function TradingJournal() {
 
 // ---------- header ----------
 
-function Header({ onAdd, onBulkAdd, onSettings, onExport, onImportClick, onTradovateImportClick, onNinjaTraderImportClick, onBackup, onRestoreClick }) {
+function Header({ onAdd, onBulkAdd, onSettings, onExport, onImportClick, onTradovateImportClick, onNinjaTraderImportClick, onBackup, onRestoreClick, theme, onToggleTheme }) {
   return (
     <div className="fj-header">
       <div>
@@ -1813,6 +1833,13 @@ function Header({ onAdd, onBulkAdd, onSettings, onExport, onImportClick, onTrado
         <div className="fj-sub">Futures trade journal — MES · MNQ · MCL · MGC, tracked across strategies</div>
       </div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <button
+          className="fj-btn"
+          onClick={onToggleTheme}
+          title={theme === "dark" ? "Switch to light (cream & tan) theme" : "Switch to dark theme"}
+        >
+          {theme === "dark" ? <Sun size={14} /> : <Moon size={14} />} {theme === "dark" ? "Light theme" : "Dark theme"}
+        </button>
         <button className="fj-btn" onClick={onSettings}><Settings2 size={14} /> Contract settings</button>
         <button className="fj-btn" onClick={onImportClick}><Upload size={14} /> Import CSV</button>
         <button className="fj-btn" onClick={onTradovateImportClick} title="Import a Tradovate Performance export and tag each trade before saving"><Upload size={14} /> Import Tradovate CSV</button>
@@ -1838,7 +1865,7 @@ function ImportPreviewModal({ preview, existingCount, onAppend, onReplace, onCan
         </div>
 
         <div className="fj-sub" style={{ marginBottom: 14, lineHeight: 1.6 }}>
-          Found <b style={{ color: "#E7E5E0" }}>{parsed.length}</b> valid trade{parsed.length === 1 ? "" : "s"} out of {total} row{total === 1 ? "" : "s"}.
+          Found <b style={{ color: "var(--text-bright)" }}>{parsed.length}</b> valid trade{parsed.length === 1 ? "" : "s"} out of {total} row{total === 1 ? "" : "s"}.
           {errorCount > 0 && (
             <> {errorCount} row{errorCount === 1 ? "" : "s"} skipped — missing or unreadable date/market/P&amp;L.</>
           )}
@@ -1850,7 +1877,7 @@ function ImportPreviewModal({ preview, existingCount, onAppend, onReplace, onCan
           </div>
         ) : (
           <div className="fj-sub" style={{ marginBottom: 16 }}>
-            You currently have <b style={{ color: "#E7E5E0" }}>{existingCount}</b> trade{existingCount === 1 ? "" : "s"} logged. Choose how to bring these in:
+            You currently have <b style={{ color: "var(--text-bright)" }}>{existingCount}</b> trade{existingCount === 1 ? "" : "s"} logged. Choose how to bring these in:
           </div>
         )}
 
@@ -2031,7 +2058,7 @@ function NoteBanner({ note, strategies, settings, accounts, onEdit, onDelete, ed
         <span className="fj-sub" style={{ margin: 0, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>{note.date}</span>
         <span className={`fj-badge ${note.category === "general" ? "cash" : "eval"}`} style={{ marginTop: 0, flexShrink: 0 }}>{NOTE_CATEGORY_LABEL[note.category] || note.category}</span>
         <span style={{ flex: 1, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title}</span>
-        {open ? <ChevronUp size={14} color="#8B929E" /> : <ChevronDown size={14} color="#8B929E" />}
+        {open ? <ChevronUp size={14} color="var(--text-dim)" /> : <ChevronDown size={14} color="var(--text-dim)" />}
       </div>
       {open && (
         <div style={{ padding: "0 12px 12px" }}>
@@ -2156,7 +2183,7 @@ function TradovateImportModal({ parsedRows, newMarkets, strategies, accounts, on
           <div>
             <p className="fj-panel-title" style={{ margin: 0 }}>Tag Tradovate trades before importing</p>
             <div className="fj-sub" style={{ marginTop: 3 }}>
-              {rows.length} trade{rows.length === 1 ? "" : "s"} parsed · net {money(totalPnl)} · <b style={{ color: "#E7E5E0" }}>{selected.size} selected</b> for import (net {money(selectedPnl)}){untaggedCount > 0 ? ` · ${untaggedCount} still untagged` : ""}
+              {rows.length} trade{rows.length === 1 ? "" : "s"} parsed · net {money(totalPnl)} · <b style={{ color: "var(--text-bright)" }}>{selected.size} selected</b> for import (net {money(selectedPnl)}){untaggedCount > 0 ? ` · ${untaggedCount} still untagged` : ""}
             </div>
           </div>
           <button className="fj-iconbtn" onClick={onCancel}><X size={18} /></button>
@@ -2164,7 +2191,7 @@ function TradovateImportModal({ parsedRows, newMarkets, strategies, accounts, on
 
         {newMarkets.length > 0 && (
           <div className="fj-sub" style={{ marginBottom: 12, padding: "8px 10px", background: "var(--panel-alt)", borderRadius: 8, border: "1px solid var(--border)" }}>
-            New market{newMarkets.length === 1 ? "" : "s"} detected: <b style={{ color: "#E7E5E0" }}>{newMarkets.map((m) => m.symbol).join(", ")}</b> — added to Contract Settings automatically.
+            New market{newMarkets.length === 1 ? "" : "s"} detected: <b style={{ color: "var(--text-bright)" }}>{newMarkets.map((m) => m.symbol).join(", ")}</b> — added to Contract Settings automatically.
             {newMarkets.some((m) => !m.verified) && " Double-check the $/point value for any unfamiliar symbol — I only pre-filled it confidently for a few common contracts."}
           </div>
         )}
@@ -2311,7 +2338,7 @@ function NinjaTraderImportModal({ parsedRows, newMarkets, skippedCount, strategi
           <div>
             <p className="fj-panel-title" style={{ margin: 0 }}>Tag NinjaTrader trades before importing</p>
             <div className="fj-sub" style={{ marginTop: 3 }}>
-              {rows.length} trade{rows.length === 1 ? "" : "s"} parsed · net {money(totalPnl)} · <b style={{ color: "#E7E5E0" }}>{selected.size} selected</b> for import (net {money(selectedPnl)}){untaggedCount > 0 ? ` · ${untaggedCount} still untagged` : ""}
+              {rows.length} trade{rows.length === 1 ? "" : "s"} parsed · net {money(totalPnl)} · <b style={{ color: "var(--text-bright)" }}>{selected.size} selected</b> for import (net {money(selectedPnl)}){untaggedCount > 0 ? ` · ${untaggedCount} still untagged` : ""}
             </div>
           </div>
           <button className="fj-iconbtn" onClick={onCancel}><X size={18} /></button>
@@ -2325,7 +2352,7 @@ function NinjaTraderImportModal({ parsedRows, newMarkets, skippedCount, strategi
 
         {newMarkets.length > 0 && (
           <div className="fj-sub" style={{ marginBottom: 12, padding: "8px 10px", background: "var(--panel-alt)", borderRadius: 8, border: "1px solid var(--border)" }}>
-            New market{newMarkets.length === 1 ? "" : "s"} detected: <b style={{ color: "#E7E5E0" }}>{newMarkets.map((m) => m.symbol).join(", ")}</b> — added to Contract Settings automatically.
+            New market{newMarkets.length === 1 ? "" : "s"} detected: <b style={{ color: "var(--text-bright)" }}>{newMarkets.map((m) => m.symbol).join(", ")}</b> — added to Contract Settings automatically.
             {newMarkets.some((m) => !m.verified) && " Double-check the $/point value for any unfamiliar symbol — I only pre-filled it confidently for a few common contracts."}
           </div>
         )}
@@ -2430,7 +2457,7 @@ function RestorePreviewModal({ preview, existingTradeCount, existingAccountCount
         ) : (
           <>
             <div className="fj-sub" style={{ marginBottom: 14, lineHeight: 1.6 }}>
-              This backup contains <b style={{ color: "#E7E5E0" }}>{preview.tradeCount}</b> trade{preview.tradeCount === 1 ? "" : "s"} and <b style={{ color: "#E7E5E0" }}>{preview.accountCount}</b> account{preview.accountCount === 1 ? "" : "s"}.
+              This backup contains <b style={{ color: "var(--text-bright)" }}>{preview.tradeCount}</b> trade{preview.tradeCount === 1 ? "" : "s"} and <b style={{ color: "var(--text-bright)" }}>{preview.accountCount}</b> account{preview.accountCount === 1 ? "" : "s"}.
             </div>
             <div className="fj-loss" style={{ fontSize: 12.5, marginBottom: 16, lineHeight: 1.6 }}>
               Restoring replaces everything currently in this journal — your {existingTradeCount} current trade{existingTradeCount === 1 ? "" : "s"} and {existingAccountCount} current account{existingAccountCount === 1 ? "" : "s"} will be overwritten. This can't be undone unless you have another backup of the current data.
@@ -2945,10 +2972,10 @@ function ChartTooltip({ active, payload, label }) {
   if (real.length === 0) return null;
   const labelFor = (key) => key === "portfolio" ? "Portfolio" : key === "equity" ? "Equity" : key;
   return (
-    <div style={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, padding: "8px 10px", fontFamily: "JetBrains Mono", fontSize: 12 }}>
-      <div style={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}>{`Trade #${label}`}</div>
+    <div style={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px", fontFamily: "JetBrains Mono", fontSize: 12 }}>
+      <div style={{ color: "var(--text-bright)", fontWeight: 600, marginBottom: 4 }}>{`Trade #${label}`}</div>
       {real.map((entry) => (
-        <div key={entry.dataKey} style={{ color: entry.stroke || "#E7E5E0" }}>
+        <div key={entry.dataKey} style={{ color: entry.stroke || "var(--text-bright)" }}>
           {`${labelFor(entry.dataKey)}: ${money(entry.value)}`}
         </div>
       ))}
@@ -2978,7 +3005,7 @@ function ChangeMarkerLabel({ viewBox, note, onHover }) {
       onMouseLeave={() => onHover(null)}
       style={{ cursor: "pointer" }}
     >
-      <rect x={x - 18} y={y - 20} width={36} height={14} rx={3} fill="#14161B" stroke="#D9A441" strokeWidth={1} />
+      <rect x={x - 18} y={y - 20} width={36} height={14} rx={3} fill="var(--bg)" stroke="var(--amber)" strokeWidth={1} />
       <text x={x} y={y - 10} textAnchor="middle" fill="#D9A441" fontSize={9} fontFamily="JetBrains Mono" fontWeight={700}>change</text>
       <circle cx={x} cy={y} r={3.5} fill="#D9A441" />
     </g>
@@ -3019,9 +3046,9 @@ function EquityChart({ curve, color = "#D9A441", changeNotes = [] }) {
               {stops.map((s, idx) => <stop key={idx} offset={s.offset} stopColor={s.color} stopOpacity={0.22} />)}
             </linearGradient>
           </defs>
-          <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
-          <XAxis dataKey="i" type="number" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-          <YAxis stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+          <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+          <XAxis dataKey="i" type="number" stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+          <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
           <Area
             dataKey={(d) => d.equity} type="monotone" stroke="none"
             fill={`url(#eqFill-${gradId})`} isAnimationActive={false} legendType="none"
@@ -3043,12 +3070,12 @@ function EquityChart({ curve, color = "#D9A441", changeNotes = [] }) {
       {hoveredMarker && (
         <div style={{
           position: "absolute", left: Math.max(hoveredMarker.x - 100, 4), top: hoveredMarker.y + 6,
-          background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, padding: "9px 11px",
+          background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, padding: "9px 11px",
           fontSize: 12, width: 210, zIndex: 10, pointerEvents: "none", boxShadow: "0 4px 14px rgba(0,0,0,0.45)",
         }}>
           <div style={{ fontFamily: "'JetBrains Mono', monospace", color: "#D9A441", fontSize: 10.5, marginBottom: 3 }}>{hoveredMarker.note.date}</div>
-          <div style={{ fontFamily: "Inter, sans-serif", fontWeight: 600, color: "#E7E5E0", marginBottom: hoveredMarker.note.body ? 4 : 0 }}>{hoveredMarker.note.title}</div>
-          {hoveredMarker.note.body && <div style={{ fontFamily: "Inter, sans-serif", color: "#8B929E", lineHeight: 1.4, fontSize: 11.5 }}>{hoveredMarker.note.body}</div>}
+          <div style={{ fontFamily: "Inter, sans-serif", fontWeight: 600, color: "var(--text-bright)", marginBottom: hoveredMarker.note.body ? 4 : 0 }}>{hoveredMarker.note.title}</div>
+          {hoveredMarker.note.body && <div style={{ fontFamily: "Inter, sans-serif", color: "var(--text-dim)", lineHeight: 1.4, fontSize: 11.5 }}>{hoveredMarker.note.body}</div>}
         </div>
       )}
     </div>
@@ -3071,9 +3098,9 @@ function PortfolioEquityChart({ data, strategies, visible, colorFor }) {
             {stops.map((s, idx) => <stop key={idx} offset={s.offset} stopColor={s.color} stopOpacity={0.2} />)}
           </linearGradient>
         </defs>
-        <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
-        <XAxis dataKey="i" type="number" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-        <YAxis stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+        <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+        <XAxis dataKey="i" type="number" stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+        <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
         <Area
           dataKey={(d) => d.portfolio} type="monotone" stroke="none"
           fill={`url(#pfFill-${gradId})`} isAnimationActive={false} legendType="none"
@@ -3620,7 +3647,7 @@ function AccountBar({ min, current, max, currentLabel, minLabel, maxLabel }) {
     <div style={{ margin: "10px 0 4px" }}>
       <div style={{ position: "relative", height: 10, borderRadius: 6, background: "var(--panel-alt)", border: "1px solid var(--border)" }}>
         <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${pct}%`, borderRadius: 6, background: zoneColor, transition: "width .2s" }} />
-        <div style={{ position: "absolute", left: `${pct}%`, top: -4, transform: "translateX(-50%)", width: 2, height: 18, background: "#E7E5E0" }} />
+        <div style={{ position: "absolute", left: `${pct}%`, top: -4, transform: "translateX(-50%)", width: 2, height: 18, background: "var(--text-bright)" }} />
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5, fontSize: 10.5, fontFamily: "JetBrains Mono, monospace" }}>
         <span style={{ color: "var(--text-dim)" }}>{minLabel}<br /><b style={{ color: "var(--text)" }}>{money(min)}</b></span>
@@ -3918,10 +3945,10 @@ function NoteRow({ note, onEdit, onDelete, colSpan }) {
       <tr style={{ background: "var(--panel-alt)" }}>
         <td colSpan={colSpan} style={{ padding: "6px 10px", cursor: "pointer" }} onClick={() => setOpen((o) => !o)}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, fontFamily: "Inter, sans-serif" }}>
-            <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "#8B929E", fontSize: 12 }}>{note.date}</span>
+            <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "var(--text-dim)", fontSize: 12 }}>{note.date}</span>
             <span className={`fj-badge ${note.category === "general" ? "cash" : "eval"}`} style={{ marginTop: 0 }}>{NOTE_CATEGORY_LABEL[note.category] || note.category}</span>
             <span style={{ fontWeight: 600, fontSize: 13, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title}</span>
-            {open ? <ChevronUp size={13} color="#8B929E" /> : <ChevronDown size={13} color="#8B929E" />}
+            {open ? <ChevronUp size={13} color="var(--text-dim)" /> : <ChevronDown size={13} color="var(--text-dim)" />}
           </div>
         </td>
       </tr>
@@ -4082,7 +4109,7 @@ function TradeLog({ trades, notes, strategies, settings, accounts, editingNoteId
       {bulkMode && onBulkCopy && (
         <div className="fj-panel" style={{ background: "rgba(108,147,173,0.08)", borderColor: "var(--accent-blue, #6C93AD)", marginBottom: 12 }}>
           <div className="fj-sub" style={{ marginBottom: 10 }}>
-            Or <b style={{ color: "#E7E5E0" }}>copy</b> the checked trades into a new strategy instead — the originals stay exactly where they are, untouched, and the copies show up as fresh trades under the new name. Copies are excluded from the portfolio's overall totals and account balances (they're the same underlying trade, not new money) — they only count toward the new strategy's own numbers.
+            Or <b style={{ color: "var(--text-bright)" }}>copy</b> the checked trades into a new strategy instead — the originals stay exactly where they are, untouched, and the copies show up as fresh trades under the new name. Copies are excluded from the portfolio's overall totals and account balances (they're the same underlying trade, not new money) — they only count toward the new strategy's own numbers.
           </div>
           <div className="fj-form-row" style={{ gridTemplateColumns: "1fr 1fr auto", alignItems: "end", gap: 10 }}>
             <div className="fj-form-field">
@@ -4174,14 +4201,14 @@ function TradeLog({ trades, notes, strategies, settings, accounts, editingNoteId
                     </span>
                   )}
                 </td>
-                <td style={{ fontFamily: "Inter, sans-serif", color: "#8B929E" }}>{(t.accounts && t.accounts.length) ? t.accounts.join(", ") : "—"}</td>
+                <td style={{ fontFamily: "Inter, sans-serif", color: "var(--text-dim)" }}>{(t.accounts && t.accounts.length) ? t.accounts.join(", ") : "—"}</td>
                 <td className={t.direction === "Short" ? "fj-loss" : "fj-profit"}>{t.direction}</td>
                 <td>{t.contracts}</td>
                 <td>{t.entry || "—"}</td>
                 <td>{t.exit || "—"}</td>
                 <td className={t.pnl >= 0 ? "fj-profit" : "fj-loss"}>{money(t.pnl)}</td>
-                <td style={{ color: "#8B929E" }}>{formatDuration(t.durationSec)}</td>
-                <td style={{ fontFamily: "Inter, sans-serif", color: "#8B929E", maxWidth: 180, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.notes || ""}</td>
+                <td style={{ color: "var(--text-dim)" }}>{formatDuration(t.durationSec)}</td>
+                <td style={{ fontFamily: "Inter, sans-serif", color: "var(--text-dim)", maxWidth: 180, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{t.notes || ""}</td>
                 <td className="actions">
                   <button className="fj-iconbtn" onClick={() => onEdit(t)}><Pencil size={14} /></button>
                   <button className="fj-iconbtn" onClick={() => onDelete(t.id)}><Trash2 size={14} /></button>
@@ -4510,14 +4537,14 @@ function WindowStatsPanel({ trades }) {
 
           <ResponsiveContainer width="100%" height={190}>
             <BarChart data={barData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
-              <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
-              <XAxis dataKey="name" stroke="#8B929E" tick={{ fontSize: 10.5, fontFamily: "JetBrains Mono" }} interval={0} angle={rows.length > 8 ? -40 : 0} textAnchor={rows.length > 8 ? "end" : "middle"} height={rows.length > 8 ? 55 : 30} />
-              <YAxis stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+              <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+              <XAxis dataKey="name" stroke="var(--text-dim)" tick={{ fontSize: 10.5, fontFamily: "JetBrains Mono" }} interval={0} angle={rows.length > 8 ? -40 : 0} textAnchor={rows.length > 8 ? "end" : "middle"} height={rows.length > 8 ? 55 : 30} />
+              <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
               <ReferenceLine y={0} stroke="#3A4150" />
               <Tooltip
-                contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
-                labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
-                itemStyle={{ color: "#E7E5E0" }}
+                contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+                labelStyle={{ color: "var(--text-bright)", fontWeight: 600, marginBottom: 4 }}
+                itemStyle={{ color: "var(--text-bright)" }}
                 cursor={{ fill: "rgba(139,146,158,0.08)" }}
                 formatter={(v) => [money(v), "P&L"]}
               />
@@ -4538,7 +4565,7 @@ function WindowStatsPanel({ trades }) {
                 {rows.map((r) => (
                   <tr key={r.key}>
                     <td>{r.label}</td>
-                    <td>{r.stats.n} <span style={{ color: "#8B929E" }}>({r.stats.wins}W/{r.stats.losses}L)</span></td>
+                    <td>{r.stats.n} <span style={{ color: "var(--text-dim)" }}>({r.stats.wins}W/{r.stats.losses}L)</span></td>
                     <td>{pct(r.stats.winRate)}</td>
                     <td className={r.stats.totalPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(r.stats.totalPnl)}</td>
                     <td className={r.stats.expectancy >= 0 ? "fj-profit" : "fj-loss"}>{money(r.stats.expectancy)}</td>
@@ -4597,7 +4624,7 @@ function MartingaleDepthPanel({ trades }) {
     const row = winRateData.find((d) => d.name === payload.value);
     return (
       <g transform={`translate(${x},${y})`}>
-        <text x={0} y={0} dy={12} textAnchor="middle" fill="#8B929E" fontSize={11} fontFamily="JetBrains Mono, monospace">{payload.value}</text>
+        <text x={0} y={0} dy={12} textAnchor="middle" fill="var(--text-dim)" fontSize={11} fontFamily="JetBrains Mono, monospace">{payload.value}</text>
         <text x={0} y={0} dy={25} textAnchor="middle" fill="#545B68" fontSize={9.5} fontFamily="JetBrains Mono, monospace">n={row ? row.n : 0}</text>
       </g>
     );
@@ -4607,7 +4634,7 @@ function MartingaleDepthPanel({ trades }) {
     <div className="fj-panel">
       <p className="fj-panel-title">Stats by martingale depth</p>
       <div className="fj-sub" style={{ marginBottom: 12, lineHeight: 1.6 }}>
-        Detected base size for this strategy: <b style={{ color: "#E7E5E0" }}>{base} contract{base === 1 ? "" : "s"}</b>. Trades are bucketed by size relative to that base (1x/2x/4x…), and every number below is normalized to a single contract — otherwise a 4x trade's bigger dollar swing would just look "more effective" by construction.
+        Detected base size for this strategy: <b style={{ color: "var(--text-bright)" }}>{base} contract{base === 1 ? "" : "s"}</b>. Trades are bucketed by size relative to that base (1x/2x/4x…), and every number below is normalized to a single contract — otherwise a 4x trade's bigger dollar swing would just look "more effective" by construction.
       </div>
 
       <div className="fj-stat-grid" style={{ marginBottom: 14 }}>
@@ -4640,14 +4667,14 @@ function MartingaleDepthPanel({ trades }) {
           </div>
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={winRateData} margin={{ top: 4, right: 8, left: -10, bottom: 4 }}>
-              <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
-              <XAxis dataKey="name" stroke="#8B929E" tick={winRateTick} interval={0} height={38} />
-              <YAxis stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} domain={[0, 100]} unit="%" />
+              <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+              <XAxis dataKey="name" stroke="var(--text-dim)" tick={winRateTick} interval={0} height={38} />
+              <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} domain={[0, 100]} unit="%" />
               <ReferenceLine y={overallWinRate} stroke="#D9A441" strokeDasharray="4 3" label={{ value: "blended", position: "insideTopRight", fill: "#D9A441", fontSize: 10 }} />
               <Tooltip
-                contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
-                labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
-                itemStyle={{ color: "#E7E5E0" }}
+                contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+                labelStyle={{ color: "var(--text-bright)", fontWeight: 600, marginBottom: 4 }}
+                itemStyle={{ color: "var(--text-bright)" }}
                 cursor={{ fill: "rgba(139,146,158,0.08)" }}
                 formatter={(v, key, item) => [`${v}% (n=${item.payload.n})`, "Win rate"]}
               />
@@ -4655,7 +4682,7 @@ function MartingaleDepthPanel({ trades }) {
                 {winRateData.map((d, i) => (
                   <Cell key={i} fill={d.winRate >= overallWinRate ? "#5FA37A" : "#C2634A"} />
                 ))}
-                <ErrorBar dataKey="ciDelta" width={4} strokeWidth={1.25} stroke="#8B929E" />
+                <ErrorBar dataKey="ciDelta" width={4} strokeWidth={1.25} stroke="var(--text-dim)" />
               </Bar>
             </BarChart>
           </ResponsiveContainer>
@@ -4667,15 +4694,15 @@ function MartingaleDepthPanel({ trades }) {
           </div>
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={evData} margin={{ top: 4, right: 8, left: -10, bottom: 4 }}>
-              <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" />
-              <XAxis dataKey="name" stroke="#8B929E" tick={winRateTick} interval={0} height={38} />
-              <YAxis stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+              <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+              <XAxis dataKey="name" stroke="var(--text-dim)" tick={winRateTick} interval={0} height={38} />
+              <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
               <ReferenceLine y={0} stroke="#3A4150" />
               <ReferenceLine y={overallExpectancyPerContract} stroke="#D9A441" strokeDasharray="4 3" label={{ value: "blended", position: "insideTopRight", fill: "#D9A441", fontSize: 10 }} />
               <Tooltip
-                contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
-                labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
-                itemStyle={{ color: "#E7E5E0" }}
+                contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+                labelStyle={{ color: "var(--text-bright)", fontWeight: 600, marginBottom: 4 }}
+                itemStyle={{ color: "var(--text-bright)" }}
                 cursor={{ fill: "rgba(139,146,158,0.08)" }}
                 formatter={(v, key, item) => [`${money(v)}/contract (n=${item.payload.n})`, "EV"]}
               />
@@ -4698,11 +4725,11 @@ function MartingaleDepthPanel({ trades }) {
             {rows.map((r) => (
               <tr key={r.depth}>
                 <td style={{ fontFamily: "Inter, sans-serif", fontWeight: 600 }}>
-                  {r.label} <span style={{ color: "#8B929E", fontWeight: 400 }}>({r.contractsAtDepth}c)</span>
+                  {r.label} <span style={{ color: "var(--text-dim)", fontWeight: 400 }}>({r.contractsAtDepth}c)</span>
                   {r.lowSample && <span className="fj-badge eval" style={{ marginLeft: 6 }} title="Under 10 trades — treat this bucket as a rough estimate">Low sample</span>}
                 </td>
-                <td>{r.n} <span style={{ color: "#8B929E" }}>({r.wins}W/{r.losses}L)</span></td>
-                <td>{pct(r.winRate)} <span style={{ color: "#8B929E" }}>({r.ciLower.toFixed(0)}–{r.ciUpper.toFixed(0)}%)</span></td>
+                <td>{r.n} <span style={{ color: "var(--text-dim)" }}>({r.wins}W/{r.losses}L)</span></td>
+                <td>{pct(r.winRate)} <span style={{ color: "var(--text-dim)" }}>({r.ciLower.toFixed(0)}–{r.ciUpper.toFixed(0)}%)</span></td>
                 <td className="fj-profit">{r.wins ? money(r.avgWinPerContract) : "—"}</td>
                 <td className="fj-loss">{r.losses ? money(r.avgLossPerContract) : "—"}</td>
                 <td className={r.expectancyPerContract >= 0 ? "fj-profit" : "fj-loss"}>{money(r.expectancyPerContract)}</td>
@@ -5101,9 +5128,9 @@ function TradeScatterChart({ trades, settings, strategies }) {
   };
 
   const colorFor = (point) => {
-    if (colorMode === "market") return settings[point.market]?.accent || "#8B929E";
+    if (colorMode === "market") return settings[point.market]?.accent || "var(--text-dim)";
     if (colorMode === "strategy") {
-      if (point.strategy === "—") return "#8B929E";
+      if (point.strategy === "—") return "var(--text-dim)";
       const idx = strategies.indexOf(point.strategy);
       return ACCENT_PALETTE[idx >= 0 ? idx % ACCENT_PALETTE.length : 0];
     }
@@ -5118,7 +5145,7 @@ function TradeScatterChart({ trades, settings, strategies }) {
     }
     if (colorMode === "strategy") {
       const items = strategies.map((s, idx) => ({ label: s, color: ACCENT_PALETTE[idx % ACCENT_PALETTE.length] }));
-      if (data.some((d) => d.strategy === "—")) items.push({ label: "No strategy", color: "#8B929E" });
+      if (data.some((d) => d.strategy === "—")) items.push({ label: "No strategy", color: "var(--text-dim)" });
       return items;
     }
     return [
@@ -5143,15 +5170,15 @@ function TradeScatterChart({ trades, settings, strategies }) {
       <div style={{ maxWidth: 360, margin: "0 auto" }}>
         <ResponsiveContainer width="100%" height={340}>
           <ScatterChart margin={{ top: 8, right: 20, left: -10, bottom: 0 }}>
-            <CartesianGrid stroke="#2B303A" strokeDasharray="3 3" horizontal={true} vertical={false} />
+            <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" horizontal={true} vertical={false} />
             <XAxis type="number" dataKey="x" domain={[-0.15, 1.15]} hide />
-            <YAxis type="number" dataKey="pnl" name="P&L" stroke="#8B929E" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+            <YAxis type="number" dataKey="pnl" name="P&L" stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
             <ReferenceLine y={0} stroke="#3A4150" />
             <Tooltip
               cursor={{ strokeDasharray: "3 3", stroke: "#3A4150" }}
-              contentStyle={{ background: "#21252D", border: "1px solid #2B303A", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
-              labelStyle={{ color: "#E7E5E0", fontWeight: 600, marginBottom: 4 }}
-              itemStyle={{ color: "#E7E5E0" }}
+              contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+              labelStyle={{ color: "var(--text-bright)", fontWeight: 600, marginBottom: 4 }}
+              itemStyle={{ color: "var(--text-bright)" }}
               formatter={(value, name) => {
                 if (name === "pnl") return [money(value), "P&L"];
                 return [value, name];
@@ -5189,7 +5216,7 @@ function TradeScatterChart({ trades, settings, strategies }) {
                 cursor: "pointer",
                 opacity: isDimmed ? 0.4 : 1,
                 fontWeight: isActive ? 700 : 400,
-                color: isActive ? "#E7E5E0" : undefined,
+                color: isActive ? "var(--text-bright)" : undefined,
               }}
               title={isActive ? `Showing only ${item.label} — click to clear` : `Click to highlight ${item.label}`}
             >
@@ -5242,7 +5269,7 @@ function DowHourHeatmap({ trades }) {
                   style={{
                     width: 22, height: 20, borderRadius: 3,
                     background: heatColor(cell.pnl, maxAbs),
-                    border: "1px solid #2B303A",
+                    border: "1px solid var(--border)",
                   }}
                 />
               );
@@ -5303,7 +5330,7 @@ function CalendarHeatmap({ trades }) {
                 style={{
                   width: 18, height: 18, borderRadius: 4,
                   background: d.count ? heatColor(d.pnl, maxAbs) : "rgba(139,146,158,0.06)",
-                  border: "1px solid #2B303A",
+                  border: "1px solid var(--border)",
                 }}
               />
             ))}
