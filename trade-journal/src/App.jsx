@@ -741,6 +741,45 @@ function flattenTrades(trades, sizeMultiplier = 1) {
   return trades.map((t) => ({ ...t, contracts: 1, pnl: (t.pnl / (t.contracts || 1)) * sizeMultiplier }));
 }
 
+// Simulates a theoretical capped martingale on top of a strategy's own
+// win/loss sequence: each trade is replayed in time order at the stated
+// base size, doubling after every consecutive loss and resetting to base
+// after a win, never exceeding baseContracts * capMultiplier. Each trade's
+// per-contract P&L is taken from the trade itself (P&L / contracts), so
+// this works whether the strategy was actually traded flat at 1 contract
+// or was already martingaled — the sizing is imposed by the simulation,
+// not read from what was traded. A scratch (exactly 0) leaves the streak
+// unchanged.
+function simulateCappedMartingale(trades, baseContracts, capMultiplier) {
+  const sorted = [...trades].sort(
+    (a, b) => new Date(`${a.date}T${a.time || "00:00"}`) - new Date(`${b.date}T${b.time || "00:00"}`)
+  );
+  let lossStreak = 0;
+  return sorted.map((t) => {
+    const perContract = t.pnl / (t.contracts || 1);
+    const mult = Math.min(Math.pow(2, lossStreak), capMultiplier);
+    const contracts = baseContracts * mult;
+    if (perContract < 0) lossStreak += 1;
+    else if (perContract > 0) lossStreak = 0;
+    return { ...t, contracts, pnl: perContract * contracts };
+  });
+}
+
+// Sweeps that simulation across caps — "max of 1x" (flat, no martingale)
+// up through "max of 16x" (5-level doubling) — so you can see what each
+// cap would have done to this strategy's own trade sequence.
+function computeMartingaleCapSweep(trades, { baseContracts = 1, caps = [1, 2, 4, 8, 16] } = {}) {
+  if (!trades || trades.length === 0) return [];
+  return caps.map((capMultiplier) => {
+    const simulated = simulateCappedMartingale(trades, baseContracts, capMultiplier);
+    return {
+      capMultiplier,
+      maxContracts: baseContracts * capMultiplier,
+      stats: calcStats(simulated),
+    };
+  });
+}
+
 // ---------- martingale depth sweep ----------
 //
 // Models a real capped martingale: sizing doubles (base, 2x, 4x...) up to
@@ -2719,6 +2758,14 @@ function OptimizerView({ trades, strategies, accounts }) {
     [entityTrades, baseNum, capDepthNum, bufferNum, tradesAheadNum]
   );
 
+  // Real historical performance at each cap level, base 1x up to 16x — not
+  // a theoretical projection, the actual trades re-sized and re-summed as
+  // if the martingale had been capped there from the start.
+  const capSweep = useMemo(
+    () => computeMartingaleCapSweep(entityTrades, { baseContracts: baseNum, caps: [1, 2, 4, 8, 16] }),
+    [entityTrades, baseNum]
+  );
+
   const ror = useMemo(
     () => computeRiskOfRuin(flatAtBase, { buffer: Math.max(bufferNum, 1), numTrades: tradesAheadNum }),
     [flatAtBase, bufferNum, tradesAheadNum]
@@ -2826,6 +2873,54 @@ function OptimizerView({ trades, strategies, accounts }) {
               Martingale sizing {pnlDelta >= 0 ? "added" : "cost"} <b style={{ color: "var(--text)" }}>{money(Math.abs(pnlDelta))}</b> in total P&amp;L
               {" "}and {ddDelta >= 0 ? "increased" : "reduced"} max drawdown by <b style={{ color: "var(--text)" }}>{money(Math.abs(ddDelta))}</b>, compared to flat sizing.
               Win rate is identical either way — sizing doesn't change which trades won or lost.
+            </div>
+          </div>
+
+          <div className="fj-panel">
+            <p className="fj-panel-title">Martingale cap sweep — performance by max size</p>
+            <div className="fj-sub" style={{ marginBottom: 12 }}>
+              Your strategy's real win/loss sequence, replayed in order with a theoretical martingale layered on: start at {baseNum}x, double after each loss, reset after a win, never exceed the cap in the first column. The 1x row is flat sizing (no martingale); 16x allows up to {baseNum * 16} contracts. Works the same whether you traded this strategy flat or already martingaled — the sizing comes from the simulation, the wins and losses come from your trades.
+            </div>
+            <div style={{ overflowX: "auto", marginBottom: 14 }}>
+              <table className="fj-table">
+                <thead>
+                  <tr><th>Max size</th><th>Total P&amp;L</th><th>Max drawdown</th><th>Profit factor</th><th>Win rate</th><th>Expectancy/trade</th></tr>
+                </thead>
+                <tbody>
+                  {capSweep.map((row) => (
+                    <tr key={row.capMultiplier}>
+                      <td style={{ fontFamily: "Inter, sans-serif", fontWeight: 600 }}>
+                        {row.capMultiplier}x <span className="fj-sub" style={{ fontSize: 11 }}>({row.maxContracts} contract{row.maxContracts === 1 ? "" : "s"})</span>
+                      </td>
+                      <td className={row.stats.totalPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(row.stats.totalPnl)}</td>
+                      <td className="fj-loss">{money(-row.stats.maxDD)}</td>
+                      <td>{row.stats.profitFactor === null ? "—" : row.stats.profitFactor === Infinity ? "∞" : row.stats.profitFactor.toFixed(2)}</td>
+                      <td>{pct(row.stats.winRate)}</td>
+                      <td className={row.stats.expectancy >= 0 ? "fj-profit" : "fj-loss"}>{money(row.stats.expectancy)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <ResponsiveContainer width="100%" height={220}>
+              <BarChart data={capSweep.map((row) => ({ name: `${row.capMultiplier}x`, pnl: row.stats.totalPnl }))}>
+                <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
+                <XAxis dataKey="name" stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+                <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+                <Tooltip
+                  contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+                  formatter={(value) => [money(value), "Total P&L"]}
+                />
+                <ReferenceLine y={0} stroke="var(--border)" />
+                <Bar dataKey="pnl" name="Total P&L" radius={[3, 3, 0, 0]}>
+                  {capSweep.map((row) => (
+                    <Cell key={row.capMultiplier} fill={row.stats.totalPnl >= 0 ? "var(--profit)" : "var(--loss)"} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+            <div className="fj-sub" style={{ marginTop: 6, fontSize: 11 }}>
+              Bars show total P&amp;L at each cap. Where the number stops changing between two caps, your loss streaks never got deep enough to reach the lower cap — raising it further added no extra effect.
             </div>
           </div>
 
