@@ -106,8 +106,13 @@ function parseTradovateRow(row) {
   // came first (and therefore direction and duration) is unaffected — only
   // the displayed/stored date and time change. That's computed later, once,
   // from _entryMs + whatever offset is chosen.
+  const buyId = (row.buyFillId || "").toString().trim();
+  const sellId = (row.sellFillId || "").toString().trim();
   return {
     _entryMs: isLong ? bought.ms : sold.ms,
+    // Fill IDs are stable across re-exports, so this pair identifies the
+    // round-turn and lets a re-upload skip trades already in the journal.
+    _fingerprint: buyId && sellId ? `${buyId}|${sellId}` : "",
     durationSec: Math.round(Math.abs(sold.ms - bought.ms) / 1000),
     market: root,
     direction: isLong ? "Long" : "Short",
@@ -1243,21 +1248,31 @@ export default function TradingJournal() {
           setTradovateImport({ error: "This doesn't look like a Tradovate Performance export — expected columns like buyFillId, sellFillId, boughtTimestamp, soldTimestamp weren't found." });
           return;
         }
-        const parsedRows = [];
+        const allParsedRows = [];
         let errorCount = 0;
         results.data.forEach((row) => {
           const parsed = parseTradovateRow(row);
-          if (parsed) parsedRows.push(parsed);
+          if (parsed) allParsedRows.push(parsed);
           else errorCount++;
         });
-        if (parsedRows.length === 0) {
+        if (allParsedRows.length === 0) {
           setTradovateImport({ error: `Couldn't parse any rows from this file${errorCount ? ` (${errorCount} row${errorCount === 1 ? "" : "s"} failed)` : ""}.` });
+          return;
+        }
+
+        // Skip any round-turn whose fill-ID pair matches a trade already in
+        // the journal, so re-uploading an overlapping export is safe.
+        const alreadyImported = new Set(trades.map((t) => t._tvFingerprint).filter(Boolean));
+        const parsedRows = allParsedRows.filter((r) => !r._fingerprint || !alreadyImported.has(r._fingerprint));
+        const skippedCount = allParsedRows.length - parsedRows.length;
+        if (parsedRows.length === 0) {
+          setTradovateImport({ error: `Every trade in this file (${allParsedRows.length}) has already been imported — nothing new to add. You can safely re-export and re-upload any time; only new trades get pulled in.` });
           return;
         }
         const existingSymbols = new Set(Object.keys(settings));
         const newSymbols = Array.from(new Set(parsedRows.map((r) => r.market).filter((s) => !existingSymbols.has(s))));
         const newMarkets = newSymbols.map((symbol) => ({ symbol, ...guessMarketDefaults(symbol) }));
-        setTradovateImport({ parsedRows, newMarkets });
+        setTradovateImport({ parsedRows, newMarkets, skippedCount });
       },
     });
     e.target.value = "";
@@ -1271,6 +1286,7 @@ export default function TradingJournal() {
       accounts: r.accounts, direction: r.direction, contracts: r.contracts,
       entry: r.entry, exit: r.exit, fees: r.fees, pnl: r.pnl, notes: r.notes,
       durationSec: r.durationSec,
+      _tvFingerprint: r._fingerprint || undefined,
     }));
     setTrades((prev) => [...prev, ...newTrades]);
     if (tradovateImport.newMarkets.length > 0) {
@@ -1706,6 +1722,7 @@ export default function TradingJournal() {
         <TradovateImportModal
           parsedRows={tradovateImport.parsedRows}
           newMarkets={tradovateImport.newMarkets}
+          skippedCount={tradovateImport.skippedCount}
           strategies={strategies}
           accounts={accounts}
           onConfirm={confirmTradovateImport}
@@ -2173,7 +2190,7 @@ function TimelineView({ notes, strategies, settings, accounts, onAddNote, onUpda
   );
 }
 
-function TradovateImportModal({ parsedRows, newMarkets, strategies, accounts, onConfirm, onCancel }) {
+function TradovateImportModal({ parsedRows, newMarkets, skippedCount, strategies, accounts, onConfirm, onCancel }) {
   const [rows, setRows] = useState(() => parsedRows.map((r) => ({ ...r, _id: uid() })));
   const [selected, setSelected] = useState(() => new Set(rows.map((r) => r._id)));
   const [bulkStrategy, setBulkStrategy] = useState("");
@@ -2227,6 +2244,12 @@ function TradovateImportModal({ parsedRows, newMarkets, strategies, accounts, on
           </div>
           <button className="fj-iconbtn" onClick={onCancel}><X size={18} /></button>
         </div>
+
+        {skippedCount > 0 && (
+          <div className="fj-sub" style={{ marginBottom: 12, padding: "8px 10px", background: "var(--panel-alt)", borderRadius: 8, border: "1px solid var(--border)" }}>
+            {skippedCount} trade{skippedCount === 1 ? "" : "s"} in this file {skippedCount === 1 ? "was" : "were"} already imported and skipped automatically — only new trades are shown below.
+          </div>
+        )}
 
         {newMarkets.length > 0 && (
           <div className="fj-sub" style={{ marginBottom: 12, padding: "8px 10px", background: "var(--panel-alt)", borderRadius: 8, border: "1px solid var(--border)" }}>
