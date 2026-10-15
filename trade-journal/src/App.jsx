@@ -82,11 +82,29 @@ function parseTradovatePnl(str) {
 // day to day — safe to state with confidence. Anything not in this list
 // gets a placeholder multiplier of 1 and is flagged for the user to fix.
 const KNOWN_MARKET_DEFAULTS = {
-  NQ: { label: "E-mini Nasdaq-100", multiplier: 20, category: "mini" },
+  NQ: { label: "E-mini Nasdaq-100", multiplier: 20, category: "mini", feePerContract: 5.76 },
   ES: { label: "E-mini S&P 500", multiplier: 50, category: "mini" },
   RTY: { label: "E-mini Russell 2000", multiplier: 50, category: "mini" },
   YM: { label: "E-mini Dow", multiplier: 5, category: "mini" },
 };
+
+// Round-trip commission/fees per contract, set per market in Contract
+// Settings ($5.76 for NQ = $2.88 a side). Stored P&L everywhere in the app
+// is NET of fees, so anything that creates a trade subtracts this.
+function feeForTrade(settings, market, contracts) {
+  const perContract = Number(settings?.[market]?.feePerContract) || 0;
+  return Number((perContract * (Number(contracts) || 1)).toFixed(2));
+}
+
+// Existing saved settings predate the fee field. Seed NQ to the $5.76
+// starting value only when the field has never been set, so a value the
+// user later edits (even to 0) is never overwritten.
+function seedFeeDefaults(settings) {
+  if (settings.NQ && settings.NQ.feePerContract === undefined) {
+    return { ...settings, NQ: { ...settings.NQ, feePerContract: 5.76 } };
+  }
+  return settings;
+}
 
 function guessMarketDefaults(root) {
   if (KNOWN_MARKET_DEFAULTS[root]) return { ...KNOWN_MARKET_DEFAULTS[root], verified: true };
@@ -548,7 +566,7 @@ function tCritical95(df) {
 //     trades no matter how good the early numbers look.
 // Everything is computed on the flat 1-contract-normalized trade list, so
 // size doesn't distort the comparison across strategies.
-function computeStrategyGrade(trades, { minTrades = 10 } = {}) {
+function computeStrategyGrade(trades, { minTrades = 10, settings = null } = {}) {
   if (!trades || trades.length === 0) return null;
   const flat = flattenTrades(trades, 1);
   const perTrade = flat.map((t) => t.pnl);
@@ -586,6 +604,22 @@ function computeStrategyGrade(trades, { minTrades = 10 } = {}) {
     grade = "C";
     reasons.push(`Capped at C: under ${minTrades} trades isn't a reliable enough sample to call the edge confirmed yet, whatever the CI says.`);
   }
+  // Fees are already inside every number above (stored P&L is net), so the
+  // grade is an after-fees grade. These lines show how much of the gross
+  // edge fees took, and call out the case where fees are the whole story.
+  const totalFees = trades.reduce((sum, t) => sum + (Number(t.fees) || 0), 0);
+  const grossPnl = stats.totalPnl + totalFees;
+  const feeShare = grossPnl > 0 ? (totalFees / grossPnl) * 100 : null;
+  const grossMean = trades.reduce((sum, t) => sum + ((t.pnl + (Number(t.fees) || 0)) / (t.contracts || 1)), 0) / n;
+  const missingFeeCount = settings
+    ? trades.filter((t) => Number(settings[t.market]?.feePerContract) > 0 && !(Number(t.fees) > 0)).length
+    : 0;
+  if (totalFees > 0) {
+    reasons.push(`Graded after fees: ${money(totalFees)} in fees${feeShare !== null ? ` took ${feeShare.toFixed(1)}% of ${money(grossPnl)} gross P&L` : ` on ${money(grossPnl)} gross P&L`}.`);
+    if (grossMean > 0 && mean <= 0) reasons.push(`Profitable before fees (${money(grossMean)}/contract) but not after (${money(mean)}/contract) — fees are what's holding this grade down.`);
+    else if (grossMean > 0 && significance !== "confirmed_positive") reasons.push(`Fees cost ${money(grossMean - mean)}/contract of a ${money(grossMean)}/contract gross edge — the after-fees edge isn't confirmed yet.`);
+  }
+  if (missingFeeCount > 0) reasons.push(`${missingFeeCount} trade${missingFeeCount === 1 ? "" : "s"} in a market with a fee set ${missingFeeCount === 1 ? "has" : "have"} no fee recorded, so this grade is still flattered by them — use "Apply to existing trades" in Contract Settings to include them.`);
   if (lowSample) reasons.push(`${n} trade${n === 1 ? "" : "s"} logged — treat this grade as provisional until it clears ${minTrades}.`);
   else reasons.push(`${n} trades logged.`);
 
@@ -593,6 +627,7 @@ function computeStrategyGrade(trades, { minTrades = 10 } = {}) {
     grade, n, mean, ciLower, ciUpper, significance, lowSample,
     profitFactor: stats.profitFactor, calmar, totalPnl: stats.totalPnl,
     winRate: stats.winRate, maxDD: stats.maxDD, reasons,
+    totalFees, grossPnl, feeShare, grossMean, missingFeeCount,
   };
 }
 
@@ -665,6 +700,14 @@ function StrategyGradePanel({ grade }) {
         <div className="fj-stat-card">
           <div className="fj-stat-label">Win rate</div>
           <div className="fj-stat-value" style={{ fontSize: 15 }}>{pct(grade.winRate)}</div>
+        </div>
+        <div className="fj-stat-card">
+          <div className="fj-stat-label">Fees paid</div>
+          <div className={`fj-stat-value ${grade.totalFees > 0 ? "fj-loss" : ""}`} style={{ fontSize: 15 }}>{money(-grade.totalFees)}</div>
+        </div>
+        <div className="fj-stat-card">
+          <div className="fj-stat-label">Fees % of gross P&amp;L</div>
+          <div className="fj-stat-value" style={{ fontSize: 15 }}>{grade.feeShare === null ? "—" : `${grade.feeShare.toFixed(1)}%`}</div>
         </div>
         <div className="fj-stat-card">
           <div className="fj-stat-label">Sample size</div>
@@ -835,6 +878,7 @@ function calcStats(trades) {
     profitFactor: null, expectancy: 0, maxDD: 0,
     largestWin: 0, largestLoss: 0, wins: 0, losses: 0, scratches: 0,
     maxWinStreak: 0, maxLossStreak: 0,
+    totalFees: 0, grossPnl: 0,
   };
   if (n === 0) return base;
 
@@ -842,6 +886,9 @@ function calcStats(trades) {
   const losses = trades.filter((t) => t.pnl < 0);
   const scratches = trades.filter((t) => t.pnl === 0);
   const totalPnl = trades.reduce((s, t) => s + t.pnl, 0);
+  // Stored P&L is already net of fees, so fees are tracked alongside it
+  // rather than subtracted again — gross is just net plus fees paid.
+  const totalFees = trades.reduce((s, t) => s + (Number(t.fees) || 0), 0);
   const grossProfit = wins.reduce((s, t) => s + t.pnl, 0);
   const grossLoss = Math.abs(losses.reduce((s, t) => s + t.pnl, 0));
 
@@ -866,6 +913,8 @@ function calcStats(trades) {
   return {
     n,
     totalPnl,
+    totalFees,
+    grossPnl: totalPnl + totalFees,
     winRate: (wins.length / n) * 100,
     avgWin: wins.length ? grossProfit / wins.length : 0,
     avgLoss: losses.length ? grossLoss / losses.length : 0,
@@ -1079,7 +1128,7 @@ export default function TradingJournal() {
         loadJSON(THEME_KEY, "dark"),
       ]);
       setTrades(t);
-      setSettings({ ...DEFAULT_SETTINGS, ...s });
+      setSettings(seedFeeDefaults({ ...DEFAULT_SETTINGS, ...s }));
       setAccounts(a);
       setNotes(n);
       setTheme(th === "light" ? "light" : "dark");
@@ -1272,7 +1321,21 @@ export default function TradingJournal() {
         const existingSymbols = new Set(Object.keys(settings));
         const newSymbols = Array.from(new Set(parsedRows.map((r) => r.market).filter((s) => !existingSymbols.has(s))));
         const newMarkets = newSymbols.map((symbol) => ({ symbol, ...guessMarketDefaults(symbol) }));
-        setTradovateImport({ parsedRows, newMarkets, skippedCount });
+
+        // Tradovate's Performance export is gross of commissions, so apply
+        // each market's per-contract fee from Contract Settings (falling
+        // back to the known default for a market that's new to the journal).
+        const feeFor = (r) => {
+          const perContract = settings[r.market]?.feePerContract ?? newMarkets.find((m) => m.symbol === r.market)?.feePerContract ?? 0;
+          return Number(((Number(perContract) || 0) * r.contracts).toFixed(2));
+        };
+        let feesApplied = 0;
+        const rowsWithFees = parsedRows.map((r) => {
+          const fees = feeFor(r);
+          feesApplied += fees;
+          return fees ? { ...r, fees, pnl: Number((r.pnl - fees).toFixed(2)) } : r;
+        });
+        setTradovateImport({ parsedRows: rowsWithFees, newMarkets, skippedCount, feesApplied: Number(feesApplied.toFixed(2)) });
       },
     });
     e.target.value = "";
@@ -1295,7 +1358,7 @@ export default function TradingJournal() {
         tradovateImport.newMarkets.forEach((m) => {
           if (!next[m.symbol]) {
             const accent = ACCENT_PALETTE[Object.keys(next).length % ACCENT_PALETTE.length];
-            next[m.symbol] = { label: m.label, multiplier: m.multiplier, accent, category: m.category };
+            next[m.symbol] = { label: m.label, multiplier: m.multiplier, accent, category: m.category, feePerContract: m.feePerContract ?? 0 };
           }
         });
         return next;
@@ -1346,10 +1409,17 @@ export default function TradingJournal() {
         const newMarkets = newSymbols.map((symbol) => ({ symbol, ...guessMarketDefaults(symbol) }));
         const multiplierFor = (root) => settings[root]?.multiplier ?? newMarkets.find((m) => m.symbol === root)?.multiplier ?? 1;
 
+        // Sim accounts export $0 commission, so fall back to the market's
+        // per-contract fee from Contract Settings. A real commission in the
+        // file always wins — never charge both.
+        const feePerContractFor = (root) => settings[root]?.feePerContract ?? newMarkets.find((m) => m.symbol === root)?.feePerContract ?? 0;
+        let feesApplied = 0;
         const parsedRows = summaries.map((s) => {
           const multiplier = multiplierFor(s.root);
           const dirSign = s.direction === "Long" ? 1 : -1;
-          const pnl = Number((((s.exitPrice - s.entryPrice) * multiplier * s.qty * dirSign) - s.commission).toFixed(2));
+          const fees = s.commission > 0 ? Number(s.commission.toFixed(2)) : Number(((Number(feePerContractFor(s.root)) || 0) * s.qty).toFixed(2));
+          if (s.commission <= 0) feesApplied += fees;
+          const pnl = Number((((s.exitPrice - s.entryPrice) * multiplier * s.qty * dirSign) - fees).toFixed(2));
           return {
             _entryMs: s.entryMs,
             _fingerprint: s.fingerprint,
@@ -1359,14 +1429,14 @@ export default function TradingJournal() {
             contracts: s.qty,
             entry: s.entryPrice,
             exit: s.exitPrice,
-            fees: Number(s.commission.toFixed(2)),
+            fees,
             pnl,
             notes: [s.entryNames.join("/"), s.exitNames.join("/")].filter(Boolean).join(" → "),
             strategy: "",
             accounts: [],
           };
         });
-        setNinjaImport({ parsedRows, newMarkets, skippedCount });
+        setNinjaImport({ parsedRows, newMarkets, skippedCount, feesApplied: Number(feesApplied.toFixed(2)) });
       },
     });
     e.target.value = "";
@@ -1389,7 +1459,7 @@ export default function TradingJournal() {
         ninjaImport.newMarkets.forEach((m) => {
           if (!next[m.symbol]) {
             const accent = ACCENT_PALETTE[Object.keys(next).length % ACCENT_PALETTE.length];
-            next[m.symbol] = { label: m.label, multiplier: m.multiplier, accent, category: m.category };
+            next[m.symbol] = { label: m.label, multiplier: m.multiplier, accent, category: m.category, feePerContract: m.feePerContract ?? 0 };
           }
         });
         return next;
@@ -1450,7 +1520,7 @@ export default function TradingJournal() {
     const { data } = restorePreview;
     setTrades(Array.isArray(data.trades) ? data.trades : []);
     setAccounts(Array.isArray(data.accounts) ? data.accounts : []);
-    setSettings({ ...DEFAULT_SETTINGS, ...(data.settings || {}) });
+    setSettings(seedFeeDefaults({ ...DEFAULT_SETTINGS, ...(data.settings || {}) }));
     setNotes(Array.isArray(data.notes) ? data.notes : []);
     setSelectedEntity(null);
     setView("home");
@@ -1723,6 +1793,7 @@ export default function TradingJournal() {
           parsedRows={tradovateImport.parsedRows}
           newMarkets={tradovateImport.newMarkets}
           skippedCount={tradovateImport.skippedCount}
+          feesApplied={tradovateImport.feesApplied}
           strategies={strategies}
           accounts={accounts}
           onConfirm={confirmTradovateImport}
@@ -1750,6 +1821,7 @@ export default function TradingJournal() {
           parsedRows={ninjaImport.parsedRows}
           newMarkets={ninjaImport.newMarkets}
           skippedCount={ninjaImport.skippedCount}
+          feesApplied={ninjaImport.feesApplied}
           strategies={strategies}
           accounts={accounts}
           onConfirm={confirmNinjaImport}
@@ -1783,7 +1855,7 @@ export default function TradingJournal() {
       )}
 
       {showSettings && (
-        <SettingsPanel settings={settings} setSettings={setSettings} onClose={() => setShowSettings(false)} />
+        <SettingsPanel settings={settings} setSettings={setSettings} trades={trades} setTrades={setTrades} onClose={() => setShowSettings(false)} />
       )}
 
       <div className="fj-tabs">
@@ -2190,7 +2262,7 @@ function TimelineView({ notes, strategies, settings, accounts, onAddNote, onUpda
   );
 }
 
-function TradovateImportModal({ parsedRows, newMarkets, skippedCount, strategies, accounts, onConfirm, onCancel }) {
+function TradovateImportModal({ parsedRows, newMarkets, skippedCount, feesApplied, strategies, accounts, onConfirm, onCancel }) {
   const [rows, setRows] = useState(() => parsedRows.map((r) => ({ ...r, _id: uid() })));
   const [selected, setSelected] = useState(() => new Set(rows.map((r) => r._id)));
   const [bulkStrategy, setBulkStrategy] = useState("");
@@ -2244,6 +2316,12 @@ function TradovateImportModal({ parsedRows, newMarkets, skippedCount, strategies
           </div>
           <button className="fj-iconbtn" onClick={onCancel}><X size={18} /></button>
         </div>
+
+        {feesApplied > 0 && (
+          <div className="fj-sub" style={{ marginBottom: 12, padding: "8px 10px", background: "var(--panel-alt)", borderRadius: 8, border: "1px solid var(--border)" }}>
+            Per-contract fees from Contract Settings were applied: <b style={{ color: "var(--text-bright)" }}>{money(feesApplied)}</b> total, already subtracted from the P&amp;L shown below.
+          </div>
+        )}
 
         {skippedCount > 0 && (
           <div className="fj-sub" style={{ marginBottom: 12, padding: "8px 10px", background: "var(--panel-alt)", borderRadius: 8, border: "1px solid var(--border)" }}>
@@ -2352,7 +2430,7 @@ function TradovateImportModal({ parsedRows, newMarkets, skippedCount, strategies
 }
 
 
-function NinjaTraderImportModal({ parsedRows, newMarkets, skippedCount, strategies, accounts, onConfirm, onCancel }) {
+function NinjaTraderImportModal({ parsedRows, newMarkets, skippedCount, feesApplied, strategies, accounts, onConfirm, onCancel }) {
   const [rows, setRows] = useState(() => parsedRows.map((r) => ({ ...r, _id: uid() })));
   const [selected, setSelected] = useState(() => new Set(rows.map((r) => r._id)));
   const [bulkStrategy, setBulkStrategy] = useState("");
@@ -2405,6 +2483,12 @@ function NinjaTraderImportModal({ parsedRows, newMarkets, skippedCount, strategi
           </div>
           <button className="fj-iconbtn" onClick={onCancel}><X size={18} /></button>
         </div>
+
+        {feesApplied > 0 && (
+          <div className="fj-sub" style={{ marginBottom: 12, padding: "8px 10px", background: "var(--panel-alt)", borderRadius: 8, border: "1px solid var(--border)" }}>
+            Per-contract fees from Contract Settings were applied: <b style={{ color: "var(--text-bright)" }}>{money(feesApplied)}</b> total, already subtracted from the P&amp;L shown below.
+          </div>
+        )}
 
         {skippedCount > 0 && (
           <div className="fj-sub" style={{ marginBottom: 12, padding: "8px 10px", background: "var(--panel-alt)", borderRadius: 8, border: "1px solid var(--border)" }}>
@@ -2560,7 +2644,8 @@ const PROP_PRESETS = [
   },
 ];
 
-function SettingsPanel({ settings, setSettings, onClose }) {
+function SettingsPanel({ settings, setSettings, trades, setTrades, onClose }) {
+  const [pendingApply, setPendingApply] = useState(null); // market symbol awaiting confirm
   const [newSymbol, setNewSymbol] = useState("");
   const [newLabel, setNewLabel] = useState("");
   const [newMultiplier, setNewMultiplier] = useState("");
@@ -2577,9 +2662,25 @@ function SettingsPanel({ settings, setSettings, onClose }) {
     const accent = ACCENT_PALETTE[markets.length % ACCENT_PALETTE.length];
     setSettings((s) => ({
       ...s,
-      [sym]: { label: newLabel.trim() || sym, multiplier: Number(newMultiplier) || 1, accent, category: newCategory },
+      [sym]: { label: newLabel.trim() || sym, multiplier: Number(newMultiplier) || 1, accent, category: newCategory, feePerContract: 0 },
     }));
     setNewSymbol(""); setNewLabel(""); setNewMultiplier(""); setNewCategory("micro"); setError("");
+  };
+
+  // Trades in this market with no fee recorded yet — the ones a fee change
+  // can be back-filled onto. Trades that already carry a fee are never
+  // touched, which also makes the back-fill safe to run twice.
+  const backfillCandidates = (sym) => (trades || []).filter((t) => t.market === sym && !(Number(t.fees) > 0));
+
+  const applyFeeToExisting = (sym) => {
+    const perContract = Number(settings[sym]?.feePerContract) || 0;
+    if (!perContract) { setPendingApply(null); return; }
+    setTrades((prev) => prev.map((t) => {
+      if (t.market !== sym || Number(t.fees) > 0) return t;
+      const fee = Number((perContract * (Number(t.contracts) || 1)).toFixed(2));
+      return { ...t, fees: fee, pnl: Number((t.pnl - fee).toFixed(2)) };
+    }));
+    setPendingApply(null);
   };
 
   const removeMarket = (sym) => {
@@ -2614,6 +2715,31 @@ function SettingsPanel({ settings, setSettings, onClose }) {
               value={settings[m].multiplier}
               onChange={(e) => setSettings((s) => ({ ...s, [m]: { ...s[m], multiplier: e.target.value } }))}
             />
+            <label className="fj-sub" style={{ display: "block", margin: "2px 0 3px", fontSize: 10.5 }}>Round-trip fee / contract ($)</label>
+            <input
+              type="number" step="0.01" min="0" className="fj-input" style={{ width: "100%", marginBottom: 6 }}
+              value={settings[m].feePerContract ?? ""} placeholder="0.00"
+              onChange={(e) => { setPendingApply(null); setSettings((s) => ({ ...s, [m]: { ...s[m], feePerContract: e.target.value } })); }}
+            />
+            {Number(settings[m].feePerContract) > 0 && (() => {
+              const candidates = backfillCandidates(m);
+              if (candidates.length === 0) return null;
+              const perContract = Number(settings[m].feePerContract);
+              const totalFee = candidates.reduce((sum, t) => sum + perContract * (Number(t.contracts) || 1), 0);
+              return pendingApply === m ? (
+                <div className="fj-sub" style={{ marginBottom: 6, fontSize: 11, lineHeight: 1.5 }}>
+                  Subtract <b style={{ color: "var(--text-bright)" }}>{money(totalFee)}</b> from {candidates.length} existing {m} trade{candidates.length === 1 ? "" : "s"} with no fee recorded?
+                  <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                    <button type="button" className="fj-btn primary" style={{ padding: "3px 8px", fontSize: 11 }} onClick={() => applyFeeToExisting(m)}>Apply</button>
+                    <button type="button" className="fj-btn" style={{ padding: "3px 8px", fontSize: 11 }} onClick={() => setPendingApply(null)}>Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <button type="button" className="fj-btn" style={{ width: "100%", marginBottom: 6, padding: "4px 8px", fontSize: 11 }} onClick={() => setPendingApply(m)}>
+                  Apply to {candidates.length} existing trade{candidates.length === 1 ? "" : "s"}…
+                </button>
+              );
+            })()}
             <select
               className="fj-select" style={{ width: "100%", fontSize: 11.5 }}
               value={settings[m].category || "micro"}
@@ -2627,7 +2753,7 @@ function SettingsPanel({ settings, setSettings, onClose }) {
       </div>
 
       <div className="fj-sub" style={{ margin: "10px 0" }}>
-        Point values only affect the optional entry/exit calculator in the trade form — P&amp;L is always stored as a plain number you can edit directly. Micro/Mini controls the toggle on the Portfolio tab. Removing a market keeps any trades already logged under it in your journal, but hides it from the ticker strip and By Market breakdown.
+        Point values only affect the optional entry/exit calculator in the trade form — P&amp;L is always stored as a plain number you can edit directly. The round-trip fee (e.g. NQ $5.76 = $2.88 a side) is multiplied by contracts and subtracted from P&amp;L on every new trade, bulk entry, and Tradovate/NinjaTrader import; “Apply to existing trades” back-fills only trades that have no fee recorded yet. Micro/Mini controls the toggle on the Portfolio tab. Removing a market keeps any trades already logged under it in your journal, but hides it from the ticker strip and By Market breakdown.
       </div>
 
       <form onSubmit={addMarket} className="fj-form-row" style={{ gridTemplateColumns: "90px 1fr 100px 100px auto", alignItems: "end", marginBottom: 0 }}>
@@ -3027,7 +3153,9 @@ function LongShortTable({ longStats, shortStats }) {
 
 function StatGrid({ stats }) {
   const items = [
-    ["Total P&L", stats.n ? money(stats.totalPnl) : "—", stats.totalPnl >= 0 ? "fj-profit" : "fj-loss"],
+    ["Total P&L (net)", stats.n ? money(stats.totalPnl) : "—", stats.totalPnl >= 0 ? "fj-profit" : "fj-loss"],
+    ["Gross P&L (before fees)", stats.n ? money(stats.grossPnl) : "—", stats.grossPnl >= 0 ? "fj-profit" : "fj-loss"],
+    ["Total fees", stats.n ? money(-stats.totalFees) : "—", stats.totalFees > 0 ? "fj-loss" : ""],
     ["Trades", stats.n, ""],
     ["Win rate", stats.n ? pct(stats.winRate) : "—", ""],
     ["Profit factor", stats.profitFactor === null ? "—" : stats.profitFactor === Infinity ? "∞" : stats.profitFactor.toFixed(2), ""],
@@ -3326,10 +3454,10 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
     const list = names
       .map((s) => {
         const stratTrades = categoryScopedTradesWithCopies.filter((t) => t.strategy === s);
-        return { key: s, stats: calcStats(stratTrades), curve: equityCurve(stratTrades), grade: computeStrategyGrade(stratTrades) };
+        return { key: s, stats: calcStats(stratTrades), curve: equityCurve(stratTrades), grade: computeStrategyGrade(stratTrades, { settings }) };
       });
     return sortGroups(list, strategySort);
-  }, [categoryScopedTradesWithCopies, strategySort]);
+  }, [categoryScopedTradesWithCopies, strategySort, settings]);
 
   const acctRollup = useMemo(() => {
     if (accounts.length === 0) return null;
@@ -3457,6 +3585,7 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
                 <div className="fj-strat-meta-row">
                   <span>{pct(s.stats.winRate)} win</span>
                   <span>{s.stats.n} trades</span>
+                  {s.stats.totalFees > 0 && <span title="Total fees paid — P&L shown is after fees">fees {money(s.stats.totalFees)}</span>}
                   <span>PF {s.stats.profitFactor === null ? "—" : s.stats.profitFactor === Infinity ? "∞" : s.stats.profitFactor.toFixed(2)}</span>
                 </div>
                 <ResponsiveContainer width="100%" height={40}>
@@ -5104,7 +5233,7 @@ function DetailView({ selected, trades, settings, strategies, notes, accounts, o
   const longStats = useMemo(() => calcStats(longTrades), [longTrades]);
   const shortStats = useMemo(() => calcStats(shortTrades), [shortTrades]);
   const accent = isStrategy ? ACCENT_PALETTE[idx >= 0 ? idx % ACCENT_PALETTE.length : 0] : (settings[selected.key]?.accent || "#D9A441");
-  const grade = useMemo(() => (isStrategy ? computeStrategyGrade(entityTrades) : null), [isStrategy, entityTrades]);
+  const grade = useMemo(() => (isStrategy ? computeStrategyGrade(entityTrades, { settings }) : null), [isStrategy, entityTrades, settings]);
 
   const goPrev = () => { if (list.length === 0) return; onNavigate(selected.type, list[(idx - 1 + list.length) % list.length]); };
   const goNext = () => { if (list.length === 0) return; onNavigate(selected.type, list[(idx + 1) % list.length]); };
@@ -5470,7 +5599,10 @@ function TradeForm({ initial, strategies, accounts, settings, onCancel, onSave }
   const [contracts, setContracts] = useState(initial?.contracts ?? 1);
   const [entry, setEntry] = useState(initial?.entry ?? "");
   const [exit, setExit] = useState(initial?.exit ?? "");
-  const [fees, setFees] = useState(initial?.fees ?? 0);
+  const [fees, setFees] = useState(initial?.fees ?? feeForTrade(settings, "MES", 1));
+  // For a brand-new trade the fee follows market x contracts until you type
+  // your own number; editing an existing trade never overwrites its fee.
+  const [feesTouched, setFeesTouched] = useState(Boolean(initial));
   const [grossPnl, setGrossPnl] = useState(initial ? Number((initial.pnl + (initial.fees || 0)).toFixed(2)) : "");
   const [notes, setNotes] = useState(initial?.notes || "");
   const [tradeAccounts, setTradeAccounts] = useState(initial?.accounts || []);
@@ -5478,6 +5610,10 @@ function TradeForm({ initial, strategies, accounts, settings, onCancel, onSave }
   const toggleTradeAccount = (name) => {
     setTradeAccounts((prev) => prev.includes(name) ? prev.filter((x) => x !== name) : [...prev, name]);
   };
+
+  useEffect(() => {
+    if (!feesTouched) setFees(feeForTrade(settings, market, contracts));
+  }, [market, contracts, settings, feesTouched]);
 
   const calcFromPrices = () => {
     const mult = Number(settings[market]?.multiplier) || 1;
@@ -5579,8 +5715,8 @@ function TradeForm({ initial, strategies, accounts, settings, onCancel, onSave }
               <input type="number" min="1" step="1" className="fj-input" value={contracts} onChange={(e) => setContracts(e.target.value)} />
             </div>
             <div className="fj-form-field">
-              <label>Fees (optional, $) — subtracted from Gross P&amp;L</label>
-              <input type="number" step="0.01" className="fj-input" value={fees} onChange={(e) => setFees(e.target.value)} />
+              <label>Fees ($) — subtracted from Gross P&amp;L{Number(settings[market]?.feePerContract) > 0 && !feesTouched ? ` · auto from ${market} setting` : ""}</label>
+              <input type="number" step="0.01" className="fj-input" value={fees} onChange={(e) => { setFeesTouched(true); setFees(e.target.value); }} />
             </div>
           </div>
 
@@ -5696,8 +5832,8 @@ function BulkTradeForm({ strategies, accounts, settings, onCancel, onSave }) {
       contracts: Number(r.contracts) || 1,
       entry: r.entry === "" ? null : Number(r.entry),
       exit: r.exit === "" ? null : Number(r.exit),
-      fees: 0,
-      pnl: Number(Number(r.pnl).toFixed(2)),
+      fees: feeForTrade(settings, r.market, r.contracts),
+      pnl: Number((Number(r.pnl) - feeForTrade(settings, r.market, r.contracts)).toFixed(2)),
       notes: r.notes.trim(),
       accounts: defaultAccounts,
     }));
@@ -5713,7 +5849,7 @@ function BulkTradeForm({ strategies, accounts, settings, onCancel, onSave }) {
         </div>
 
         <div className="fj-sub" style={{ marginBottom: 14, lineHeight: 1.6 }}>
-          Log several trades in one go — set defaults below to pre-fill new rows, edit anything per row, then save them all at once.
+          Log several trades in one go — set defaults below to pre-fill new rows, edit anything per row, then save them all at once.{Object.values(settings).some((m) => Number(m.feePerContract) > 0) && " Enter each row's gross P&L — per-contract fees from Contract Settings are subtracted automatically when you save."}
         </div>
 
         <div className="fj-form-row" style={{ gridTemplateColumns: "1fr 1fr 1fr", marginBottom: 6 }}>
