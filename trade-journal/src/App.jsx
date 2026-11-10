@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useCallback, useRef, useId } from 
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip,
   ResponsiveContainer, BarChart, Bar, ReferenceLine, ScatterChart, Scatter, Cell,
-  Area, ComposedChart, ErrorBar
+  Area, ComposedChart, ErrorBar, Customized
 } from "recharts";
 import { Plus, Trash2, Pencil, X, TrendingUp, TrendingDown, RotateCcw, Settings2, ChevronLeft, ChevronRight, ChevronDown, ChevronUp, ArrowLeft, Upload, Download, Sun, Moon } from "lucide-react";
 import Papa from "papaparse";
@@ -632,7 +632,7 @@ function computeStrategyGrade(trades, { minTrades = 10, settings = null } = {}) 
 }
 
 const GRADE_COLORS = {
-  A: "#5FA37A", B: "#8FBF98", C: "#D9A441", D: "#D98F6B", F: "#C2634A",
+  A: "#0B8F63", B: "#4FB38A", C: "#E0A100", D: "#E8761F", F: "#D5303F",
 };
 
 function GradeBadge({ grade, size = "md" }) {
@@ -646,7 +646,7 @@ function GradeBadge({ grade, size = "md" }) {
         display: "inline-flex", alignItems: "center", justifyContent: "center",
         width: dims.w, height: dims.h, borderRadius: 7,
         background: `${color}26`, border: `1px solid ${color}66`, color,
-        fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: dims.fs,
+        fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: dims.fs,
         flexShrink: 0,
       }}
     >
@@ -675,7 +675,7 @@ function StrategyGradePanel({ grade }) {
             display: "inline-flex", alignItems: "center", justifyContent: "center",
             width: 56, height: 56, borderRadius: 12,
             background: `${color}26`, border: `1.5px solid ${color}66`, color,
-            fontFamily: "'JetBrains Mono', monospace", fontWeight: 700, fontSize: 28,
+            fontFamily: "'Inter', sans-serif", fontWeight: 700, fontSize: 28,
           }}
         >
           {grade.grade}
@@ -937,10 +937,12 @@ function equityCurve(trades) {
     (a, b) => new Date(`${a.date}T${a.time || "00:00"}`) - new Date(`${b.date}T${b.time || "00:00"}`)
   );
   let equity = 0;
-  const points = [{ i: 0, date: sorted[0].date, equity: 0 }];
+  let gross = 0;
+  const points = [{ i: 0, date: sorted[0].date, equity: 0, gross: 0 }];
   sorted.forEach((t, idx) => {
     equity += t.pnl;
-    points.push({ i: idx + 1, date: t.date, equity: Number(equity.toFixed(2)) });
+    gross += t.pnl + (Number(t.fees) || 0);
+    points.push({ i: idx + 1, date: t.date, equity: Number(equity.toFixed(2)), gross: Number(gross.toFixed(2)) });
   });
   return points;
 }
@@ -956,19 +958,21 @@ function buildMultiEquityCurve(trades, strategyList) {
     (a, b) => new Date(`${a.date}T${a.time || "00:00"}`) - new Date(`${b.date}T${b.time || "00:00"}`)
   );
   let portfolioEq = 0;
+  let portfolioGross = 0;
   const stratEq = {};
   strategyList.forEach((s) => { stratEq[s] = 0; });
 
-  const firstRow = { i: 0, date: sorted[0].date, portfolio: 0 };
+  const firstRow = { i: 0, date: sorted[0].date, portfolio: 0, gross: 0 };
   strategyList.forEach((s) => { firstRow[s] = 0; });
   const rows = [firstRow];
 
   sorted.forEach((t, idx) => {
     portfolioEq += t.pnl;
+    portfolioGross += t.pnl + (Number(t.fees) || 0);
     if (t.strategy && Object.prototype.hasOwnProperty.call(stratEq, t.strategy)) {
       stratEq[t.strategy] += t.pnl;
     }
-    const row = { i: idx + 1, date: t.date, portfolio: Number(portfolioEq.toFixed(2)) };
+    const row = { i: idx + 1, date: t.date, portfolio: Number(portfolioEq.toFixed(2)), gross: Number(portfolioGross.toFixed(2)) };
     strategyList.forEach((s) => { row[s] = Number(stratEq[s].toFixed(2)); });
     rows.push(row);
   });
@@ -1540,196 +1544,296 @@ export default function TradingJournal() {
   return (
     <div className="fj-root" data-theme={theme}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
         .fj-root {
-          --bg: #14161B;
-          --panel: #1B1E24;
-          --panel-alt: #21252D;
-          --border: #2B303A;
-          --text: #E7E5E0;
-          --text-bright: #E7E5E0;
-          --text-dim: #8B929E;
-          --amber: #D9A441;
-          --profit: #5FA37A;
-          --loss: #C2634A;
-          font-family: 'Inter', system-ui, sans-serif;
+          --bg: #FFFFFF;
+          --panel: #FFFFFF;
+          --panel-alt: #F4F6F8;
+          --border: #E3E8ED;
+          --border-strong: #CBD3DB;
+          --text: #1B2733;
+          --text-bright: #0A1620;
+          --text-dim: #66737F;
+          --amber: #0B8F63;
+          --accent-soft: rgba(11,143,99,0.10);
+          --on-accent: #FFFFFF;
+          --profit: #0B8F63;
+          --loss: #D5303F;
+          --profit-soft: rgba(11,143,99,0.10);
+          --loss-soft: rgba(213,48,63,0.09);
+          --shadow: 0 1px 2px rgba(10,22,32,0.04);
+          --overlay: rgba(10,22,32,0.45);
+          font-family: 'Inter', system-ui, -apple-system, sans-serif;
+          font-variant-numeric: tabular-nums;
+          -webkit-font-smoothing: antialiased;
           background: var(--bg);
           color: var(--text);
-          border-radius: 10px;
-          padding: 20px;
-          min-height: 100%;
+          padding: 0 max(20px, calc((100% - 1160px) / 2)) 56px;
+          min-height: 100vh;
         }
-        .fj-root[data-theme="light"] {
-          --bg: #F4EEE1;
-          --panel: #FFFDF8;
-          --panel-alt: #EDE4D2;
-          --border: #D9CBA9;
-          --text: #3A3025;
-          --text-bright: #241D14;
-          --text-dim: #8A7A5F;
-          --amber: #B8842E;
-          --profit: #3F8B5D;
-          --loss: #B33E22;
+        .fj-root[data-theme="dark"] {
+          --bg: #0A0E11;
+          --panel: #11161B;
+          --panel-alt: #182027;
+          --border: #222B33;
+          --border-strong: #33404A;
+          --text: #D9E1E8;
+          --text-bright: #F3F6F8;
+          --text-dim: #8493A0;
+          --amber: #28CC95;
+          --accent-soft: rgba(40,204,149,0.14);
+          --on-accent: #04130D;
+          --profit: #28CC95;
+          --loss: #F5636F;
+          --profit-soft: rgba(40,204,149,0.14);
+          --loss-soft: rgba(245,99,111,0.14);
+          --shadow: none;
+          --overlay: rgba(0,0,0,0.6);
         }
+        body { margin: 0; }
         .fj-root * { box-sizing: border-box; }
-        .fj-mono { font-family: 'JetBrains Mono', monospace; }
-        .fj-display { font-family: 'Space Grotesk', sans-serif; }
+        .fj-root button, .fj-root input, .fj-root select, .fj-root textarea { font-family: inherit; }
+        .fj-mono, .fj-display { font-family: 'Inter', system-ui, sans-serif; }
 
-        .fj-header { display:flex; justify-content:space-between; align-items:flex-end; margin-bottom:18px; flex-wrap: wrap; gap: 12px; }
-        .fj-title { font-family:'Space Grotesk', sans-serif; font-size:22px; font-weight:700; letter-spacing:0.3px; margin:0; }
+        /* ---- top bar ---- */
+        .fj-header { display:flex; justify-content:space-between; align-items:center; padding:16px 0; flex-wrap: wrap; gap: 12px; }
+        .fj-brand { display:flex; align-items:center; gap:10px; }
+        .fj-brand-mark { width:30px; height:30px; border-radius:8px; background:var(--amber); display:grid; place-items:center; flex-shrink:0; }
+        .fj-title { font-size:19px; font-weight:700; letter-spacing:-0.01em; margin:0; color:var(--text-bright); }
         .fj-sub { color:var(--text-dim); font-size:12.5px; margin-top:2px; }
+        .fj-header-actions { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
 
         .fj-btn {
-          background: var(--panel-alt); color: var(--text); border: 1px solid var(--border);
-          border-radius: 7px; padding: 8px 14px; font-size: 13px; font-weight: 500;
-          cursor: pointer; display:flex; align-items:center; gap:6px; transition: border-color .15s, background .15s;
-          font-family: 'Inter', sans-serif;
+          background: var(--panel); color: var(--text); border: 1px solid var(--border-strong);
+          border-radius: 8px; padding: 0 14px; height: 36px; font-size: 13.5px; font-weight: 500;
+          cursor: pointer; display:inline-flex; align-items:center; gap:6px; transition: background .12s, border-color .12s;
         }
-        .fj-btn:hover { border-color: var(--amber); }
-        .fj-btn:focus-visible { outline: 2px solid var(--amber); outline-offset: 1px; }
-        .fj-btn.primary { background: var(--amber); color: #1B1E24; border-color: var(--amber); font-weight:600; }
-        .fj-btn.primary:hover { filter: brightness(1.08); }
-        .fj-btn.danger:hover { border-color: var(--loss); }
+        .fj-btn:hover { background: var(--panel-alt); }
+        .fj-btn:focus-visible, .fj-tab:focus-visible, .fj-pill:focus-visible, .fj-seg-btn:focus-visible, .fj-menu-item:focus-visible { outline: 2px solid var(--amber); outline-offset: 2px; }
+        .fj-btn.primary { background: var(--amber); color: var(--on-accent); border-color: var(--amber); font-weight:600; }
+        .fj-btn.primary:hover { filter: brightness(1.07); }
+        .fj-btn.icon { width:36px; padding:0; justify-content:center; }
+        .fj-btn.danger:hover { border-color: var(--loss); color: var(--loss); }
 
-        .fj-ticker { display:grid; grid-template-columns: repeat(auto-fit, minmax(190px,1fr)); gap:10px; margin-bottom:18px; }
-        .fj-ticker-card {
-          background: var(--panel); border: 1px solid var(--border); border-radius: 9px; padding: 12px 14px;
-          cursor: pointer; transition: border-color .15s, transform .1s;
-        }
-        .fj-ticker-card:hover { transform: translateY(-1px); }
-        .fj-ticker-card.active { border-color: var(--dot); }
-        .fj-ticker-top { display:flex; justify-content:space-between; align-items:center; }
-        .fj-ticker-sym { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:14px; display:flex; align-items:center; gap:6px;}
-        .fj-dot { width:8px; height:8px; border-radius:50%; }
-        .fj-ticker-pnl { font-family:'JetBrains Mono',monospace; font-size:15px; font-weight:600; margin-top:6px; }
-        .fj-ticker-meta { color: var(--text-dim); font-size:11px; margin-top:3px; }
+        .fj-menu-wrap { position:relative; }
+        .fj-menu { position:absolute; right:0; top:42px; z-index:40; min-width:240px; background:var(--panel); border:1px solid var(--border-strong);
+          border-radius:12px; padding:6px; box-shadow:0 12px 32px rgba(10,22,32,0.16); }
+        .fj-menu-group { font-size:11.5px; color:var(--text-dim); padding:8px 10px 4px; font-weight:500; }
+        .fj-menu-item { display:flex; align-items:center; gap:10px; width:100%; background:none; border:none; color:var(--text); font-size:13.5px;
+          padding:8px 10px; border-radius:8px; cursor:pointer; text-align:left; }
+        .fj-menu-item:hover { background:var(--panel-alt); }
+        .fj-btn-on { border-color:var(--amber); color:var(--amber); }
+        .fj-count { background:var(--amber); color:var(--on-accent); border-radius:999px; font-size:11.5px; font-weight:700; padding:1px 7px; }
+        .fj-menu-item input[type=checkbox] { accent-color:var(--amber); }
+        .fj-menu-sep { height:1px; background:var(--border); margin:6px 4px; }
 
-        .fj-tabs { display:flex; gap:4px; border-bottom:1px solid var(--border); margin-bottom:16px; flex-wrap:wrap; }
-        .fj-tab { background:none; border:none; color:var(--text-dim); padding:9px 14px; font-size:13px; font-weight:500;
-          cursor:pointer; border-bottom:2px solid transparent; font-family:'Inter',sans-serif; }
-        .fj-tab.active { color: var(--text); border-bottom-color: var(--amber); }
-        .fj-tab:hover { color: var(--text); }
+        /* ---- nav ---- */
+        .fj-tabs { display:flex; gap:26px; border-bottom:1px solid var(--border); margin-bottom:24px; flex-wrap:wrap; }
+        .fj-tab { background:none; border:none; color:var(--text-dim); padding:10px 0 12px; font-size:14.5px; font-weight:500;
+          cursor:pointer; border-bottom:2px solid transparent; margin-bottom:-1px; }
+        .fj-tab.active { color: var(--text-bright); font-weight:600; border-bottom-color: var(--text-bright); }
+        .fj-tab:hover { color: var(--text-bright); }
+
+        /* ---- pills / chips / segmented ---- */
+        .fj-pills { display:flex; gap:4px; flex-wrap:wrap; }
+        .fj-pill { background:none; border:none; color:var(--text-dim); font-size:13px; font-weight:600; padding:6px 12px; border-radius:999px; cursor:pointer; }
+        .fj-pill:hover { background:var(--panel-alt); color:var(--text-bright); }
+        .fj-pill.active { background:var(--accent-soft); color:var(--amber); }
+
+        .fj-chip { background:var(--panel); border:1px solid var(--border-strong); color:var(--text); border-radius:999px;
+          padding:4px 12px; font-size:12.5px; font-weight:500; cursor:pointer; user-select:none; }
+        .fj-chip:hover { background:var(--panel-alt); }
+        .fj-chip.active { color:var(--on-accent); background:var(--amber); border-color:var(--amber); font-weight:600; }
+        .fj-date-input { background:var(--panel); border:1px solid var(--border-strong); color:var(--text); border-radius:8px; padding:5px 8px; font-size:12.5px; }
+
+        .fj-seg-toggle { display:inline-flex; background:var(--panel-alt); border-radius:999px; padding:3px; gap:2px; }
+        .fj-seg-btn { background:none; color:var(--text-dim); border:none; padding:5px 13px; font-size:12.5px; font-weight:600; cursor:pointer; border-radius:999px; }
+        .fj-seg-btn:hover { color:var(--text-bright); }
+        .fj-seg-btn.active { background:var(--panel); color:var(--text-bright); box-shadow:0 1px 3px rgba(10,22,32,0.14); }
+        .fj-root[data-theme="dark"] .fj-seg-btn.active { background:var(--border-strong); box-shadow:none; }
 
         .fj-filterbar { display:flex; flex-wrap:wrap; gap:8px; align-items:center; background:var(--panel); border:1px solid var(--border);
-          border-radius: 9px; padding: 10px 12px; margin-bottom:18px; }
-        .fj-chip { background:var(--panel-alt); border:1px solid var(--border); color:var(--text-dim); border-radius:20px;
-          padding:4px 11px; font-size:12px; cursor:pointer; font-family:'JetBrains Mono',monospace; }
-        .fj-chip.active { color:#1B1E24; background:var(--amber); border-color:var(--amber); font-weight:600; }
-        .fj-date-input { background:var(--panel-alt); border:1px solid var(--border); color:var(--text); border-radius:6px; padding:5px 8px; font-size:12px; font-family:'JetBrains Mono',monospace; }
+          border-radius: 12px; padding: 12px 14px; margin-bottom:20px; }
 
-        .fj-stat-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(140px,1fr)); gap:10px; margin-bottom:20px; }
-        .fj-stat-card { background:var(--panel); border:1px solid var(--border); border-radius:9px; padding:12px 14px; }
-        .fj-stat-label { font-size:10.5px; text-transform:uppercase; letter-spacing:0.6px; color:var(--text-dim); }
-        .fj-stat-value { font-family:'JetBrains Mono',monospace; font-size:19px; font-weight:600; margin-top:5px; }
+        /* ---- hero ---- */
+        .fj-hero { margin-bottom: 28px; }
+        .fj-hero-top { display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap; }
+        .fj-hero-label { font-size:14px; font-weight:500; color:var(--text-dim); }
+        .fj-hero-value { font-size:44px; line-height:1.1; font-weight:700; letter-spacing:-0.025em; margin-top:4px; }
+        .fj-hero-delta { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:8px; font-size:14px; font-weight:600; }
+        .fj-delta-chip { display:inline-flex; align-items:center; gap:4px; padding:3px 9px; border-radius:999px; font-size:13px; font-weight:600; }
+        .fj-delta-chip.up { background:var(--profit-soft); color:var(--profit); }
+        .fj-delta-chip.down { background:var(--loss-soft); color:var(--loss); }
+        .fj-hero-meta { color:var(--text-dim); font-weight:400; font-size:13.5px; }
+        .fj-hero-chart { margin-top:14px; }
+        .fj-chart-bar { display:flex; justify-content:space-between; align-items:center; gap:10px 16px; flex-wrap:wrap; margin-bottom:6px; }
+        .fj-chart-bar-right { display:flex; align-items:center; gap:8px 10px; flex-wrap:wrap; }
+        .fj-tog { display:inline-flex; align-items:center; gap:7px; background:var(--panel); border:1px solid var(--border-strong); color:var(--text-dim); border-radius:999px; padding:4px 12px 4px 8px; font-size:12.5px; font-weight:500; cursor:pointer; }
+        .fj-tog:hover { color:var(--text-bright); background:var(--panel-alt); }
+        .fj-tog.on { color:var(--text-bright); border-color:var(--tog, var(--amber)); }
+        .fj-tog b { font-weight:600; }
+        .fj-tog-box { width:15px; height:15px; border-radius:5px; border:1.5px solid var(--border-strong); display:grid; place-items:center; flex-shrink:0; }
+        .fj-tog.on .fj-tog-box { background:var(--tog, var(--amber)); border-color:var(--tog, var(--amber)); }
+        .fj-hero-foot { display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap; margin-top:6px; }
 
-        .fj-panel { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; margin-bottom:18px; }
-        .fj-panel-title { font-family:'Space Grotesk',sans-serif; font-weight:600; font-size:14px; margin:0 0 12px 0; }
+        /* ---- stats + panels ---- */
+        .fj-stat-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(150px,1fr)); gap:0; margin-bottom:20px; border:1px solid var(--border); border-radius:12px; overflow:hidden; background:var(--panel); }
+        .fj-stat-card { background:transparent; border:none; border-right:1px solid var(--border); border-bottom:1px solid var(--border); margin:0 -1px -1px 0; border-radius:0; padding:13px 16px; }
+        .fj-stat-label { font-size:12.5px; color:var(--text-dim); font-weight:500; }
+        .fj-stat-value { font-size:21px; font-weight:600; margin-top:6px; letter-spacing:-0.01em; }
 
-        table.fj-table { width:100%; border-collapse:collapse; font-size:13px; }
-        table.fj-table th { text-align:left; color:var(--text-dim); font-weight:500; font-size:11px; text-transform:uppercase;
-          letter-spacing:0.4px; padding:6px 10px; border-bottom:1px solid var(--border); }
-        table.fj-table td { padding:8px 10px; border-bottom:1px solid var(--border); font-family:'JetBrains Mono',monospace; }
+        .fj-panel { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:20px; margin-bottom:20px; box-shadow:var(--shadow); }
+        .fj-panel-title { font-weight:600; font-size:16px; margin:0 0 14px 0; color:var(--text-bright); letter-spacing:-0.005em; }
+
+        table.fj-table { width:100%; border-collapse:collapse; font-size:13.5px; }
+        table.fj-table th { text-align:left; color:var(--text-dim); font-weight:500; font-size:12.5px; padding:8px 10px; border-bottom:1px solid var(--border); }
+        table.fj-table td { padding:10px; border-bottom:1px solid var(--border); }
         table.fj-table tr:hover td { background: var(--panel-alt); }
-        table.fj-table td.actions { display:flex; gap:6px; font-family:'Inter',sans-serif; }
-        .fj-iconbtn { background:none; border:none; color:var(--text-dim); cursor:pointer; padding:4px; border-radius:5px; }
-        .fj-iconbtn:hover { color: var(--text); background: var(--border); }
+        table.fj-table td.actions { display:flex; gap:6px; }
+        .fj-iconbtn { background:none; border:none; color:var(--text-dim); cursor:pointer; padding:5px; border-radius:6px; }
+        .fj-iconbtn:hover { color: var(--text-bright); background: var(--panel-alt); }
 
-        .fj-cards-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(230px,1fr)); gap:12px; }
-        .fj-strat-card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:14px; }
-        .fj-strat-card-clickable { cursor:pointer; transition:border-color .15s, transform .1s; }
-        .fj-strat-card-clickable:hover { border-color:var(--amber); transform:translateY(-2px); }
-        .fj-strat-pnl-big { font-family:'JetBrains Mono',monospace; font-size:19px; font-weight:700; margin-top:2px; }
-        .fj-strat-meta-row { display:flex; gap:12px; margin-top:5px; margin-bottom:8px; font-size:11px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
-        .fj-section-label { font-family:'Space Grotesk',sans-serif; font-weight:600; font-size:13px; color:var(--text-dim); margin:22px 0 10px; text-transform:uppercase; letter-spacing:0.5px; }
+        .fj-section-head { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; margin:30px 0 14px; }
+        .fj-section-label { font-weight:700; font-size:19px; color:var(--text-bright); margin:0; letter-spacing:-0.015em; }
+        .fj-section-hint { font-size:13px; color:var(--text-dim); font-weight:400; margin-left:8px; letter-spacing:0; }
 
-        .fj-back-btn { display:flex; align-items:center; gap:6px; background:none; border:none; color:var(--text-dim); cursor:pointer; font-size:13px; padding:6px 0; margin-bottom:14px; font-family:'Inter',sans-serif; }
-        .fj-back-btn:hover { color:var(--text); }
-        .fj-detail-head { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:16px; flex-wrap:wrap; gap:10px; }
-        .fj-detail-title { font-family:'Space Grotesk',sans-serif; font-size:22px; font-weight:700; margin-top:2px; }
-        .fj-strat-name { font-family:'Space Grotesk',sans-serif; font-weight:600; font-size:14.5px; margin-bottom:8px; }
-        .fj-strat-row { display:flex; justify-content:space-between; font-size:12.5px; color:var(--text-dim); padding:2px 0; }
-        .fj-strat-row b { color: var(--text); font-family:'JetBrains Mono',monospace; font-weight:500; }
+        .fj-ticker { display:grid; grid-template-columns: repeat(auto-fill, minmax(200px,1fr)); gap:12px; margin-bottom:8px; }
+        .fj-ticker-card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px 16px; cursor:pointer; transition:border-color .12s, background .12s; }
+        .fj-ticker-card:hover { border-color:var(--border-strong); background:var(--panel-alt); }
+        .fj-ticker-top { display:flex; justify-content:space-between; align-items:center; }
+        .fj-ticker-sym { font-weight:600; font-size:14.5px; display:flex; align-items:center; gap:8px; }
+        .fj-dot { width:8px; height:8px; border-radius:50%; }
+        .fj-ticker-pnl { font-size:20px; font-weight:600; margin-top:8px; letter-spacing:-0.01em; }
+        .fj-ticker-meta { color: var(--text-dim); font-size:12.5px; margin-top:3px; }
 
+        .fj-cards-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(280px,1fr)); gap:12px; }
+        .fj-strat-card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:16px; }
+        .fj-strat-card-clickable { cursor:pointer; transition:border-color .12s, background .12s; }
+        .fj-strat-card-clickable:hover { border-color:var(--border-strong); background:var(--panel-alt); }
+        .fj-strat-pnl-big { font-size:24px; font-weight:700; margin-top:2px; letter-spacing:-0.02em; }
+        .fj-strat-meta-row { display:flex; gap:12px; flex-wrap:wrap; margin-top:6px; margin-bottom:10px; font-size:12.5px; color:var(--text-dim); }
+
+        .fj-back-btn { display:flex; align-items:center; gap:6px; background:none; border:none; color:var(--text-dim); cursor:pointer; font-size:13.5px; font-weight:500; padding:6px 0; margin-bottom:12px; }
+        .fj-back-btn:hover { color:var(--text-bright); }
+        .fj-detail-head { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:18px; flex-wrap:wrap; gap:10px; }
+        .fj-detail-title { font-size:30px; font-weight:700; margin-top:2px; letter-spacing:-0.02em; color:var(--text-bright); }
+        .fj-strat-name { font-weight:600; font-size:15px; margin-bottom:6px; color:var(--text-bright); }
+        .fj-strat-row { display:flex; justify-content:space-between; font-size:13px; color:var(--text-dim); padding:3px 0; }
+        .fj-strat-row b { color: var(--text); font-weight:500; }
+
+        /* ---- calendar ---- */
         .fj-cal-nav { display:flex; align-items:center; gap:10px; }
-        .fj-cal-month-label { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:15px; min-width:150px; text-align:center; }
-        .fj-cal-grid { display:grid; grid-template-columns: repeat(7, 1fr) 110px; gap:4px; margin-top:10px; }
-        .fj-cal-headcell { font-size:10.5px; text-transform:uppercase; letter-spacing:0.5px; color:var(--text-dim); text-align:center; padding-bottom:4px; }
-        .fj-cal-cell { background:var(--panel-alt); border:1px solid var(--border); border-radius:7px; padding:6px 7px; min-height:64px; display:flex; flex-direction:column; justify-content:space-between; }
+        .fj-cal-month-label { font-weight:700; font-size:17px; min-width:150px; text-align:center; color:var(--text-bright); }
+        .fj-cal-grid { display:grid; grid-template-columns: repeat(7, 1fr) 110px; gap:6px; margin-top:12px; }
+        .fj-cal-headcell { font-size:12px; font-weight:500; color:var(--text-dim); text-align:center; padding-bottom:4px; }
+        .fj-cal-cell { background:var(--panel-alt); border:1px solid var(--border); border-radius:10px; padding:7px 8px; min-height:68px; display:flex; flex-direction:column; justify-content:space-between; }
         .fj-cal-cell.pad { opacity:0.35; }
-        .fj-cal-daynum { font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--text-dim); }
-        .fj-cal-cell-pnl { font-family:'JetBrains Mono',monospace; font-size:12.5px; font-weight:600; align-self:flex-end; }
-        .fj-cal-cell-count { font-size:9.5px; color:var(--text-dim); align-self:flex-end; }
-        .fj-cal-weektotal { background:var(--panel); border:1px solid var(--border); border-radius:7px; padding:6px 8px; display:flex; flex-direction:column;
+        .fj-cal-daynum { font-size:11.5px; color:var(--text-dim); }
+        .fj-cal-cell-pnl { font-size:13px; font-weight:600; align-self:flex-end; }
+        .fj-cal-cell-count { font-size:10.5px; color:var(--text-dim); align-self:flex-end; }
+        .fj-cal-weektotal { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:6px 8px; display:flex; flex-direction:column;
           justify-content:center; align-items:flex-end; gap:2px; }
-        .fj-cal-weektotal-label { font-size:9.5px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.4px; }
-        .fj-cal-weektotal-val { font-family:'JetBrains Mono',monospace; font-size:13px; font-weight:700; }
-
-        .fj-seg-toggle { display:flex; border:1px solid var(--border); border-radius:7px; overflow:hidden; margin-left:4px; }
-        .fj-seg-btn { background:var(--panel-alt); color:var(--text-dim); border:none; padding:6px 12px; font-size:12.5px; cursor:pointer; font-family:'Inter',sans-serif; }
-        .fj-seg-btn + .fj-seg-btn { border-left:1px solid var(--border); }
-        .fj-seg-btn.active { background:var(--amber); color:#1B1E24; font-weight:600; }
+        .fj-cal-weektotal-label { font-size:11px; color:var(--text-dim); }
+        .fj-cal-weektotal-val { font-size:13.5px; font-weight:700; }
 
         .fj-year-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap:12px; margin-top:14px; }
-        .fj-year-month-card { background:var(--panel-alt); border:1px solid var(--border); border-radius:9px; padding:12px; cursor:pointer; transition:border-color .15s, transform .1s; }
-        .fj-year-month-card:hover { border-color: var(--amber); transform: translateY(-1px); }
-        .fj-year-month-head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:9px; }
-        .fj-year-month-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:13.5px; letter-spacing:0.3px; }
-        .fj-year-month-pnl { font-family:'JetBrains Mono',monospace; font-size:12px; font-weight:600; }
+        .fj-year-month-card { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:14px; cursor:pointer; transition:border-color .12s, background .12s; }
+        .fj-year-month-card:hover { border-color: var(--border-strong); background:var(--panel-alt); }
+        .fj-year-month-head { display:flex; justify-content:space-between; align-items:baseline; margin-bottom:10px; }
+        .fj-year-month-name { font-weight:600; font-size:14.5px; }
+        .fj-year-month-pnl { font-size:13px; font-weight:600; }
         .fj-mini-grid { display:flex; gap:3px; }
         .fj-mini-week { display:flex; flex-direction:column; gap:3px; }
         .fj-mini-day { width:14px; height:14px; border-radius:3px; }
 
-        .fj-acct-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap:14px; }
-        .fj-acct-card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; }
+        /* ---- accounts ---- */
+        .fj-acct-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(300px,1fr)); gap:14px; }
+        .fj-acct-card { background:var(--panel); border:1px solid var(--border); border-radius:14px; padding:18px; }
         .fj-acct-head { display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:10px; }
-        .fj-acct-name { font-family:'Space Grotesk',sans-serif; font-weight:700; font-size:15px; }
-        .fj-badge { font-size:10.5px; text-transform:uppercase; letter-spacing:0.5px; font-weight:700; padding:3px 8px; border-radius:20px; display:inline-block; margin-top:4px; }
-        .fj-badge.eval { background:rgba(217,164,65,0.18); color:var(--amber); border:1px solid rgba(217,164,65,0.4); }
-        .fj-badge.passed { background:rgba(95,163,122,0.18); color:var(--profit); border:1px solid rgba(95,163,122,0.4); }
-        .fj-badge.failed { background:rgba(194,99,74,0.18); color:var(--loss); border:1px solid rgba(194,99,74,0.4); }
-        .fj-badge.cash { background:rgba(139,146,158,0.15); color:var(--text-dim); border:1px solid rgba(139,146,158,0.35); }
-        .fj-acct-row { display:flex; justify-content:space-between; font-size:12.5px; color:var(--text-dim); padding:3px 0; }
-        .fj-acct-row b { color: var(--text); font-family:'JetBrains Mono',monospace; font-weight:500; }
+        .fj-acct-name { font-weight:700; font-size:16px; }
+        .fj-badge { font-size:12px; font-weight:600; padding:3px 10px; border-radius:999px; display:inline-block; margin-top:4px; }
+        .fj-badge.eval { background:var(--accent-soft); color:var(--amber); }
+        .fj-badge.passed { background:var(--profit-soft); color:var(--profit); }
+        .fj-badge.failed { background:var(--loss-soft); color:var(--loss); }
+        .fj-badge.cash { background:var(--panel-alt); color:var(--text-dim); }
+        .fj-acct-row { display:flex; justify-content:space-between; font-size:13px; color:var(--text-dim); padding:3px 0; }
+        .fj-acct-row b { color: var(--text); font-weight:500; }
         .fj-acct-updateform { display:flex; gap:6px; align-items:flex-end; margin:12px 0 4px; }
         .fj-acct-history { max-height:140px; overflow-y:auto; margin-top:8px; }
-        .fj-acct-history-row { display:flex; justify-content:space-between; align-items:center; font-size:11.5px; font-family:'JetBrains Mono',monospace; padding:4px 2px; border-bottom:1px solid var(--border); color:var(--text-dim); }
+        .fj-acct-history-row { display:flex; justify-content:space-between; align-items:center; font-size:12.5px; padding:5px 2px; border-bottom:1px solid var(--border); color:var(--text-dim); }
         .fj-acct-history-row b { color:var(--text); font-weight:500; }
 
-        .fj-legend-row { display:flex; flex-wrap:wrap; gap:12px; margin-top:12px; }
-        .fj-legend-item { display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--text-dim); font-family:'JetBrains Mono',monospace; }
+        .fj-legend-row { display:flex; flex-wrap:wrap; gap:14px; margin-top:12px; }
+        .fj-legend-item { display:flex; align-items:center; gap:6px; font-size:12.5px; color:var(--text-dim); }
         .fj-legend-swatch { width:9px; height:9px; border-radius:50%; flex-shrink:0; }
 
-        .fj-empty { color:var(--text-dim); font-size:13px; text-align:center; padding:30px 10px; }
+        .fj-empty { color:var(--text-dim); font-size:13.5px; text-align:center; padding:32px 10px; }
 
-
-
-        .fj-modal-backdrop { position:fixed; inset:0; background:rgba(0,0,0,0.55); display:flex; align-items:center;
+        /* ---- forms + modals ---- */
+        .fj-modal-backdrop { position:fixed; inset:0; background:var(--overlay); display:flex; align-items:center;
           justify-content:center; z-index:50; padding:16px; }
-        .fj-modal { background:var(--panel); border:1px solid var(--border); border-radius:12px; padding:20px; width:100%;
-          max-width:520px; max-height:88vh; overflow-y:auto; }
-        .fj-form-row { display:grid; grid-template-columns: 1fr 1fr; gap:10px; margin-bottom:10px; }
-        .fj-form-field { display:flex; flex-direction:column; gap:4px; }
-        .fj-form-field label { font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:0.4px; }
+        .fj-modal { background:var(--panel); border:1px solid var(--border); border-radius:16px; padding:22px; width:100%;
+          max-width:520px; max-height:88vh; overflow-y:auto; color:var(--text); box-shadow:0 20px 60px rgba(10,22,32,0.25); }
+        .fj-form-row { display:grid; grid-template-columns: 1fr 1fr; gap:12px; margin-bottom:12px; }
+        .fj-form-field { display:flex; flex-direction:column; gap:5px; }
+        .fj-form-field label { font-size:12.5px; font-weight:500; color:var(--text-dim); }
         .fj-input, .fj-select {
-          background: var(--panel-alt); border:1px solid var(--border); color:var(--text); border-radius:6px;
-          padding:8px 9px; font-size:13px; font-family:'JetBrains Mono',monospace;
+          background: var(--panel); border:1px solid var(--border-strong); color:var(--text); border-radius:8px;
+          padding:9px 10px; font-size:13.5px;
         }
-        .fj-input:focus, .fj-select:focus { outline:2px solid var(--amber); outline-offset:0; border-color:var(--amber); }
-        .fj-input::placeholder { color: #545B68; }
+        .fj-form-field { min-width:0; }
+        .fj-input, .fj-select { width:100%; min-width:0; }
+        .fj-input:focus, .fj-select:focus { outline:2px solid var(--accent-soft); outline-offset:0; border-color:var(--amber); }
+        .fj-input::placeholder { color: var(--text-dim); opacity:0.7; }
         .fj-toggle-group { display:flex; gap:6px; }
-        .fj-toggle { flex:1; padding:8px; text-align:center; border-radius:6px; border:1px solid var(--border);
-          background:var(--panel-alt); cursor:pointer; font-size:13px; font-weight:500; }
-        .fj-toggle.active-long { background: rgba(95,163,122,0.18); border-color:var(--profit); color:var(--profit); }
-        .fj-toggle.active-short { background: rgba(194,99,74,0.18); border-color:var(--loss); color:var(--loss); }
+        .fj-toggle { flex:1; padding:9px; text-align:center; border-radius:8px; border:1px solid var(--border-strong);
+          background:var(--panel); cursor:pointer; font-size:13.5px; font-weight:600; }
+        .fj-toggle.active-long { background: var(--profit-soft); border-color:var(--profit); color:var(--profit); }
+        .fj-toggle.active-short { background: var(--loss-soft); border-color:var(--loss); color:var(--loss); }
 
         .fj-profit { color: var(--profit); }
         .fj-loss { color: var(--loss); }
         .fj-neutral { color: var(--text-dim); }
 
-        @media (max-width: 520px) {
+
+        /* ---- dashboard layout ---- */
+        .fj-dash-grid { display:grid; grid-template-columns:minmax(0,1fr) 290px; gap:36px; align-items:start; margin-bottom:28px; }
+        .fj-dash-grid .fj-hero { margin-bottom:0; }
+        .fj-side { display:flex; flex-direction:column; gap:14px; padding-top:2px; }
+        .fj-statlist-title { font-weight:600; font-size:14px; color:var(--text-bright); padding-bottom:8px; border-bottom:1px solid var(--border); }
+        .fj-statrow { display:flex; justify-content:space-between; align-items:baseline; gap:10px; padding:9px 0; border-bottom:1px solid var(--border); font-size:13.5px; color:var(--text-dim); }
+        .fj-statrow b { color:var(--text-bright); font-weight:600; }
+        .fj-statrow b.fj-profit { color:var(--profit); } .fj-statrow b.fj-loss { color:var(--loss); }
+        .fj-side-link { display:flex; justify-content:space-between; align-items:center; gap:10px; width:100%; text-align:left; background:var(--panel-alt); border:none; border-radius:12px; padding:12px 14px; cursor:pointer; color:var(--text); font-size:13.5px; }
+        .fj-side-link:hover { background:var(--accent-soft); }
+        .fj-tabbar { display:flex; align-items:center; gap:14px; flex-wrap:wrap; border-bottom:1px solid var(--border); padding-bottom:12px; margin-bottom:6px; }
+        .fj-pill.lg { font-size:14px; padding:7px 14px; }
+        .fj-table-wrap { overflow-x:auto; }
+        .fj-scroll-y { max-height:360px; overflow:auto; border-top:1px solid var(--border); border-bottom:1px solid var(--border); }
+        .fj-scroll-y table.fj-table th { position:sticky; top:0; background:var(--panel); z-index:1; }
+        .fj-th-btn { background:none; border:none; padding:0; font:inherit; color:inherit; cursor:pointer; font-weight:500; }
+        .fj-th-btn:hover, .fj-th-btn.on { color:var(--text-bright); }
+        .fj-group-table td { padding:9px 10px; vertical-align:middle; }
+        .fj-row-click { cursor:pointer; }
+        .fj-row-click.picked td { background:var(--accent-soft); }
+        .fj-name-cell { display:inline-flex; align-items:center; gap:9px; font-weight:600; color:var(--text-bright); white-space:nowrap; }
+        .fj-more-btn { display:block; margin:10px auto 0; background:none; border:none; color:var(--amber); font-weight:600; font-size:13.5px; cursor:pointer; padding:6px 12px; border-radius:8px; }
+        .fj-more-btn:hover { background:var(--accent-soft); }
+        .fj-two-col { display:grid; grid-template-columns:repeat(auto-fit, minmax(420px,1fr)); gap:22px 32px; margin-top:14px; }
+        .fj-sub-title { font-size:15px; font-weight:600; margin:0 0 10px; color:var(--text-bright); }
+        @media (max-width: 640px) { .fj-two-col { grid-template-columns:minmax(0,1fr); } .fj-col-sec { display:none; } }
+        @media (max-width: 980px) { .fj-dash-grid { grid-template-columns:minmax(0,1fr); gap:22px; } .fj-col-trend { display:none; } }
+        @media (max-width: 640px) {
           .fj-form-row { grid-template-columns: 1fr; }
+          .fj-hero-value { font-size:34px; }
+          .fj-tabs { gap:18px; overflow-x:auto; flex-wrap:nowrap; }
+          .fj-tab { white-space:nowrap; }
+          .fj-cal-grid { grid-template-columns: repeat(7, 1fr); }
+          .fj-cal-weektotal { display:none; }
+          .fj-title { font-size:17px; }
         }
+        @media (prefers-reduced-motion: reduce) { .fj-root * { transition:none !important; } }
       `}</style>
 
       <Header
@@ -1954,28 +2058,54 @@ export default function TradingJournal() {
 // ---------- header ----------
 
 function Header({ onAdd, onBulkAdd, onSettings, onExport, onImportClick, onTradovateImportClick, onNinjaTraderImportClick, onBackup, onRestoreClick, theme, onToggleTheme }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef(null);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const close = (e) => { if (menuRef.current && !menuRef.current.contains(e.target)) setMenuOpen(false); };
+    const esc = (e) => { if (e.key === "Escape") setMenuOpen(false); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", esc); };
+  }, [menuOpen]);
+  const pick = (fn) => () => { setMenuOpen(false); fn(); };
   return (
     <div className="fj-header">
-      <div>
+      <div className="fj-brand">
+        <div className="fj-brand-mark" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="var(--on-accent)" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round"><polyline points="2,13 7,8 10,11 16,4" /></svg>
+        </div>
         <h1 className="fj-title">Position Ledger</h1>
-        <div className="fj-sub">Futures trade journal — MES · MNQ · MCL · MGC, tracked across strategies</div>
       </div>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      <div className="fj-header-actions">
         <button
-          className="fj-btn"
+          className="fj-btn icon"
           onClick={onToggleTheme}
-          title={theme === "dark" ? "Switch to light (cream & tan) theme" : "Switch to dark theme"}
+          aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+          title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
         >
-          {theme === "dark" ? <Sun size={14} /> : <Moon size={14} />} {theme === "dark" ? "Light theme" : "Dark theme"}
+          {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
         </button>
-        <button className="fj-btn" onClick={onSettings}><Settings2 size={14} /> Contract settings</button>
-        <button className="fj-btn" onClick={onImportClick}><Upload size={14} /> Import CSV</button>
-        <button className="fj-btn" onClick={onTradovateImportClick} title="Import a Tradovate Performance export and tag each trade before saving"><Upload size={14} /> Import Tradovate CSV</button>
-        <button className="fj-btn" onClick={onNinjaTraderImportClick} title="Import a NinjaTrader Trades export and tag each trade before saving"><Upload size={14} /> Import NinjaTrader CSV</button>
-        <button className="fj-btn" onClick={onExport}><Download size={14} /> Export CSV</button>
-        <button className="fj-btn" onClick={onRestoreClick} title="Restore trades, accounts, and settings from a backup file"><Upload size={14} /> Restore backup</button>
-        <button className="fj-btn" onClick={onBackup} title="Download everything — trades, accounts, settings — as one file"><Download size={14} /> Backup all data</button>
-        <button className="fj-btn" onClick={onBulkAdd} title="Log several trades at once in a table, instead of one at a time"><Plus size={15} /> Add multiple trades</button>
+        <button className="fj-btn icon" onClick={onSettings} aria-label="Contract settings" title="Contract settings"><Settings2 size={16} /></button>
+        <div className="fj-menu-wrap" ref={menuRef}>
+          <button className="fj-btn" onClick={() => setMenuOpen((o) => !o)} aria-haspopup="menu" aria-expanded={menuOpen}>
+            Import &amp; export <ChevronDown size={14} />
+          </button>
+          {menuOpen && (
+            <div className="fj-menu" role="menu">
+              <div className="fj-menu-group">Import trades</div>
+              <button className="fj-menu-item" role="menuitem" onClick={pick(onTradovateImportClick)} title="Import a Tradovate Performance export and tag each trade before saving"><Upload size={15} /> Tradovate CSV</button>
+              <button className="fj-menu-item" role="menuitem" onClick={pick(onNinjaTraderImportClick)} title="Import a NinjaTrader Trades export and tag each trade before saving"><Upload size={15} /> NinjaTrader CSV</button>
+              <button className="fj-menu-item" role="menuitem" onClick={pick(onImportClick)}><Upload size={15} /> Journal CSV</button>
+              <div className="fj-menu-sep" />
+              <div className="fj-menu-group">Export and backup</div>
+              <button className="fj-menu-item" role="menuitem" onClick={pick(onExport)}><Download size={15} /> Export trades as CSV</button>
+              <button className="fj-menu-item" role="menuitem" onClick={pick(onBackup)} title="Download everything — trades, accounts, settings — as one file"><Download size={15} /> Back up all data</button>
+              <button className="fj-menu-item" role="menuitem" onClick={pick(onRestoreClick)} title="Restore trades, accounts, and settings from a backup file"><Upload size={15} /> Restore from backup</button>
+            </div>
+          )}
+        </div>
+        <button className="fj-btn" onClick={onBulkAdd} title="Log several trades at once in a table, instead of one at a time"><Plus size={15} /> Add multiple</button>
         <button className="fj-btn primary" onClick={onAdd}><Plus size={15} /> Add trade</button>
       </div>
     </div>
@@ -2070,7 +2200,7 @@ function NoteForm({ initial, strategies, settings, accounts, defaultLinks, onSav
             {strategies.map((s) => {
               const active = isLinked("strategy", s);
               return (
-                <span key={s} className="fj-chip" style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "#1B1E24", fontWeight: 600 } : undefined} onClick={() => toggleLink("strategy", s)}>
+                <span key={s} className="fj-chip" style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "var(--on-accent)", fontWeight: 600 } : undefined} onClick={() => toggleLink("strategy", s)}>
                   {s}
                 </span>
               );
@@ -2085,7 +2215,7 @@ function NoteForm({ initial, strategies, settings, accounts, defaultLinks, onSav
           {Object.keys(settings).map((m) => {
             const active = isLinked("market", m);
             return (
-              <span key={m} className="fj-chip" style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "#1B1E24", fontWeight: 600 } : undefined} onClick={() => toggleLink("market", m)}>
+              <span key={m} className="fj-chip" style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "var(--on-accent)", fontWeight: 600 } : undefined} onClick={() => toggleLink("market", m)}>
                 {m}
               </span>
             );
@@ -2100,7 +2230,7 @@ function NoteForm({ initial, strategies, settings, accounts, defaultLinks, onSav
             {accounts.map((a) => {
               const active = isLinked("account", a.name);
               return (
-                <span key={a.id} className="fj-chip" style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "#1B1E24", fontWeight: 600 } : undefined} onClick={() => toggleLink("account", a.name)}>
+                <span key={a.id} className="fj-chip" style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "var(--on-accent)", fontWeight: 600 } : undefined} onClick={() => toggleLink("account", a.name)}>
                   {a.name}
                 </span>
               );
@@ -2183,7 +2313,7 @@ function NoteBanner({ note, strategies, settings, accounts, onEdit, onDelete, ed
         style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", cursor: "pointer" }}
         onClick={() => setOpen((o) => !o)}
       >
-        <span className="fj-sub" style={{ margin: 0, fontFamily: "'JetBrains Mono', monospace", flexShrink: 0 }}>{note.date}</span>
+        <span className="fj-sub" style={{ margin: 0, fontFamily: "'Inter', sans-serif", flexShrink: 0 }}>{note.date}</span>
         <span className={`fj-badge ${note.category === "general" ? "cash" : "eval"}`} style={{ marginTop: 0, flexShrink: 0 }}>{NOTE_CATEGORY_LABEL[note.category] || note.category}</span>
         <span style={{ flex: 1, fontSize: 13, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title}</span>
         {open ? <ChevronUp size={14} color="var(--text-dim)" /> : <ChevronDown size={14} color="var(--text-dim)" />}
@@ -2401,7 +2531,7 @@ function TradovateImportModal({ parsedRows, newMarkets, skippedCount, feesApplie
                       {accounts.length === 0 && <span className="fj-sub">—</span>}
                       {accounts.map((a) => (
                         <span
-                          key={a.id} className="fj-chip" style={{ fontSize: 10, padding: "2px 7px", ...(r.accounts.includes(a.name) ? { background: "var(--amber)", borderColor: "var(--amber)", color: "#1B1E24", fontWeight: 600 } : {}) }}
+                          key={a.id} className="fj-chip" style={{ fontSize: 10, padding: "2px 7px", ...(r.accounts.includes(a.name) ? { background: "var(--amber)", borderColor: "var(--amber)", color: "var(--on-accent)", fontWeight: 600 } : {}) }}
                           onClick={() => toggleRowAccount(r._id, a.name)}
                         >
                           {a.name}
@@ -2560,7 +2690,7 @@ function NinjaTraderImportModal({ parsedRows, newMarkets, skippedCount, feesAppl
                       {accounts.length === 0 && <span className="fj-sub">—</span>}
                       {accounts.map((a) => (
                         <span
-                          key={a.id} className="fj-chip" style={{ fontSize: 10, padding: "2px 7px", ...(r.accounts.includes(a.name) ? { background: "var(--amber)", borderColor: "var(--amber)", color: "#1B1E24", fontWeight: 600 } : {}) }}
+                          key={a.id} className="fj-chip" style={{ fontSize: 10, padding: "2px 7px", ...(r.accounts.includes(a.name) ? { background: "var(--amber)", borderColor: "var(--amber)", color: "var(--on-accent)", fontWeight: 600 } : {}) }}
                           onClick={() => toggleRowAccount(r._id, a.name)}
                         >
                           {a.name}
@@ -2623,7 +2753,7 @@ function RestorePreviewModal({ preview, existingTradeCount, existingAccountCount
 }
 
 
-const ACCENT_PALETTE = ["#6C93AD", "#9385C9", "#D9A441", "#C7B15A", "#7FAE8E", "#B87F9E", "#8AA3C2", "#C0895F"];
+const ACCENT_PALETTE = ["#2F6FEB", "#7C5CE0", "#0F9D8A", "#D6409F", "#E8590C", "#5B6B7B", "#A0623A", "#3B4FC4"];
 
 // Commonly published prop-firm evaluation rules as of mid-2026. These firms
 // change pricing and rules often (Apex overhauled its entire structure in
@@ -2783,34 +2913,48 @@ function SettingsPanel({ settings, setSettings, trades, setTrades, onClose }) {
   );
 }
 
+// Compact multi-select: one button + a checklist popover, instead of a wall of chips.
+function MultiPick({ label, options, selected, onToggle, onClear }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!open) return;
+    const close = (e) => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const esc = (e) => { if (e.key === "Escape") setOpen(false); };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", esc);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", esc); };
+  }, [open]);
+  return (
+    <div className="fj-menu-wrap" ref={ref}>
+      <button className={`fj-btn ${selected.length ? "fj-btn-on" : ""}`} onClick={() => setOpen((o) => !o)} aria-haspopup="listbox" aria-expanded={open}>
+        {label}{selected.length > 0 && <span className="fj-count">{selected.length}</span>} <ChevronDown size={14} />
+      </button>
+      {open && (
+        <div className="fj-menu" style={{ left: 0, right: "auto", maxHeight: 340, overflowY: "auto" }} role="listbox" aria-multiselectable="true">
+          {options.length === 0 && <div className="fj-menu-group">None yet</div>}
+          {options.map((o) => (
+            <label key={o} className="fj-menu-item" style={{ cursor: "pointer" }}>
+              <input type="checkbox" checked={selected.includes(o)} onChange={() => onToggle(o)} /> {o}
+            </label>
+          ))}
+          {selected.length > 0 && (<><div className="fj-menu-sep" /><button className="fj-menu-item" onClick={onClear}>Clear selection</button></>)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------- filter bar ----------
 
 function FilterBar({ settings, strategies, accounts, filterMarkets, filterStrategies, filterAccounts, toggleMarketFilter, toggleStrategyFilter, toggleAccountFilter, dateFrom, dateTo, setDateFrom, setDateTo, onReset }) {
   const markets = Object.keys(settings);
   return (
     <div className="fj-filterbar">
-      <span className="fj-sub" style={{ marginRight: 2 }}>Market:</span>
-      {markets.map((m) => (
-        <span key={m} className={`fj-chip ${filterMarkets.includes(m) ? "active" : ""}`} onClick={() => toggleMarketFilter(m)}>
-          {m}
-        </span>
-      ))}
-      <span className="fj-sub" style={{ marginLeft: 10 }}>Strategy:</span>
-      {strategies.length === 0 && <span className="fj-sub">none yet</span>}
-      {strategies.map((s) => (
-        <span key={s} className={`fj-chip ${filterStrategies.includes(s) ? "active" : ""}`} onClick={() => toggleStrategyFilter(s)}>
-          {s}
-        </span>
-      ))}
+      <MultiPick label="Market" options={markets} selected={filterMarkets} onToggle={toggleMarketFilter} onClear={() => filterMarkets.forEach(toggleMarketFilter)} />
+      <MultiPick label="Strategy" options={strategies} selected={filterStrategies} onToggle={toggleStrategyFilter} onClear={() => filterStrategies.forEach(toggleStrategyFilter)} />
       {accounts.length > 0 && (
-        <>
-          <span className="fj-sub" style={{ marginLeft: 10 }}>Account:</span>
-          {accounts.map((a) => (
-            <span key={a.id} className={`fj-chip ${filterAccounts.includes(a.name) ? "active" : ""}`} onClick={() => toggleAccountFilter(a.name)}>
-              {a.name}
-            </span>
-          ))}
-        </>
+        <MultiPick label="Account" options={accounts.map((a) => a.name)} selected={filterAccounts} onToggle={toggleAccountFilter} onClear={() => filterAccounts.forEach(toggleAccountFilter)} />
       )}
       <span className="fj-sub" style={{ marginLeft: 10 }}>From</span>
       <input type="date" className="fj-date-input" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} />
@@ -3054,10 +3198,10 @@ function OptimizerView({ trades, strategies, accounts }) {
             <ResponsiveContainer width="100%" height={220}>
               <BarChart data={capSweep.map((row) => ({ name: `${row.capMultiplier}x`, pnl: row.stats.totalPnl }))}>
                 <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
-                <XAxis dataKey="name" stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-                <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+                <XAxis dataKey="name" stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "Inter" }} />
+                <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "Inter" }} />
                 <Tooltip
-                  contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+                  contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "Inter", fontSize: 12 }}
                   formatter={(value) => [money(value), "Total P&L"]}
                 />
                 <ReferenceLine y={0} stroke="var(--border)" />
@@ -3106,7 +3250,7 @@ function OptimizerView({ trades, strategies, accounts }) {
             <div className="fj-sub" style={{ marginBottom: 12 }}>
               Simulated at your stated base size ({baseNum} contract{baseNum === 1 ? "" : "s"} flat, not martingale-scaled), against the {money(bufferNum)} buffer above, over the next {tradesAheadNum} trades.
             </div>
-            <div className={ror.ror >= 0.5 ? "fj-loss" : ror.ror >= 0.2 ? "" : "fj-profit"} style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 30, fontWeight: 700, marginBottom: 10 }}>
+            <div className={ror.ror >= 0.5 ? "fj-loss" : ror.ror >= 0.2 ? "" : "fj-profit"} style={{ fontFamily: "'Inter', sans-serif", fontSize: 30, fontWeight: 700, marginBottom: 10 }}>
               {(ror.ror * 100).toFixed(1)}%
             </div>
             <div className="fj-sub">
@@ -3151,11 +3295,10 @@ function LongShortTable({ longStats, shortStats }) {
   );
 }
 
-function StatGrid({ stats }) {
-  const items = [
-    ["Total P&L (net)", stats.n ? money(stats.totalPnl) : "—", stats.totalPnl >= 0 ? "fj-profit" : "fj-loss"],
-    ["Gross P&L (before fees)", stats.n ? money(stats.grossPnl) : "—", stats.grossPnl >= 0 ? "fj-profit" : "fj-loss"],
-    ["Total fees", stats.n ? money(-stats.totalFees) : "—", stats.totalFees > 0 ? "fj-loss" : ""],
+function statItems(stats) {
+  return [
+    ["Gross P&L", stats.n ? money(stats.grossPnl) : "—", stats.grossPnl >= 0 ? "fj-profit" : "fj-loss", "Before fees"],
+    ["Fees", stats.n ? money(-stats.totalFees) : "—", stats.totalFees > 0 ? "fj-loss" : "", "Total commissions paid"],
     ["Trades", stats.n, ""],
     ["Win rate", stats.n ? pct(stats.winRate) : "—", ""],
     ["Profit factor", stats.profitFactor === null ? "—" : stats.profitFactor === Infinity ? "∞" : stats.profitFactor.toFixed(2), ""],
@@ -3163,15 +3306,20 @@ function StatGrid({ stats }) {
     ["Avg loss", stats.n ? money(-stats.avgLoss) : "—", "fj-loss"],
     ["Expectancy / trade", stats.n ? money(stats.expectancy) : "—", stats.expectancy >= 0 ? "fj-profit" : "fj-loss"],
     ["Max drawdown", stats.n ? money(-stats.maxDD) : "—", "fj-loss"],
-    ["Longest win streak", stats.n ? `${stats.maxWinStreak} trade${stats.maxWinStreak === 1 ? "" : "s"}` : "—", "fj-profit"],
-    ["Longest loss streak", stats.n ? `${stats.maxLossStreak} trade${stats.maxLossStreak === 1 ? "" : "s"}` : "—", "fj-loss"],
+    ["Win streak", stats.n ? `${stats.maxWinStreak} trade${stats.maxWinStreak === 1 ? "" : "s"}` : "—", "fj-profit", "Longest run of winning trades"],
+    ["Loss streak", stats.n ? `${stats.maxLossStreak} trade${stats.maxLossStreak === 1 ? "" : "s"}` : "—", "fj-loss", "Longest run of losing trades"],
   ];
+}
+
+// One quiet column of numbers instead of a wall of boxes.
+function StatList({ stats, title = "Key stats" }) {
   return (
-    <div className="fj-stat-grid">
-      {items.map(([label, val, cls]) => (
-        <div key={label} className="fj-stat-card">
-          <div className="fj-stat-label">{label}</div>
-          <div className={`fj-stat-value ${cls}`}>{val}</div>
+    <div className="fj-statlist">
+      <div className="fj-statlist-title">{title}</div>
+      {statItems(stats).map(([label, val, cls, hint]) => (
+        <div key={label} className="fj-statrow" title={hint}>
+          <span>{label}</span>
+          <b className={cls}>{val}</b>
         </div>
       ))}
     </div>
@@ -3191,7 +3339,7 @@ function buildTrendGradientStops(points, key) {
   if (points.length < 2) return [];
   const n = points.length;
   const pct = (idx) => `${((idx / (n - 1)) * 100).toFixed(3)}%`;
-  const colorFor = (dir) => (dir === "up" ? "#5FA37A" : "#C2634A");
+  const colorFor = (dir) => (dir === "up" ? "var(--profit)" : "var(--loss)");
   let dir = points[1][key] >= points[0][key] ? "up" : "down";
   const stops = [{ offset: pct(0), color: colorFor(dir) }];
   for (let i = 1; i < n - 1; i++) {
@@ -3216,13 +3364,14 @@ function ChartTooltip({ active, payload, label }) {
   if (!active || !payload || payload.length === 0) return null;
   const real = payload.filter((p) => typeof p.dataKey === "string");
   if (real.length === 0) return null;
-  const labelFor = (key) => key === "portfolio" ? "Portfolio" : key === "equity" ? "Equity" : key;
+  const labelFor = (key) => key === "portfolio" ? "Portfolio" : key === "equity" ? "Equity" : key === "trend" ? "Trend" : key === "hwm" ? "High-water mark" : key === "gross" ? "Before fees" : key === "dd" ? "Drawdown" : key;
   return (
-    <div style={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, padding: "8px 10px", fontFamily: "JetBrains Mono", fontSize: 12 }}>
-      <div style={{ color: "var(--text-bright)", fontWeight: 600, marginBottom: 4 }}>{`Trade #${label}`}</div>
+    <div style={{ background: "var(--panel)", border: "1px solid var(--border-strong)", borderRadius: 10, padding: "9px 12px", fontFamily: "Inter, sans-serif", fontSize: 12.5, boxShadow: "0 8px 24px rgba(10,22,32,0.14)" }}>
+      <div style={{ color: "var(--text-dim)", fontWeight: 500, marginBottom: 4 }}>{`Trade #${label}`}</div>
       {real.map((entry) => (
-        <div key={entry.dataKey} style={{ color: entry.stroke || "var(--text-bright)" }}>
-          {`${labelFor(entry.dataKey)}: ${money(entry.value)}`}
+        <div key={entry.dataKey} style={{ color: "var(--text-bright)", fontWeight: 600, display: "flex", gap: 14, justifyContent: "space-between" }}>
+          <span style={{ color: "var(--text-dim)", fontWeight: 500 }}>{labelFor(entry.dataKey)}</span>
+          <span>{money(entry.value)}</span>
         </div>
       ))}
     </div>
@@ -3235,8 +3384,8 @@ function HighLineLabel({ viewBox, peak, date }) {
   const yBase = viewBox.y + viewBox.height - (date ? 24 : 12);
   return (
     <g>
-      <text x={x} y={yBase} fill="#5FA37A" fontSize={10.5} fontFamily="JetBrains Mono" fontWeight={600}>{`High ${money(peak)}`}</text>
-      {date && <text x={x} y={yBase + 13} fill="#5FA37A" fontSize={9.5} fontFamily="JetBrains Mono" opacity={0.8}>{date}</text>}
+      <text x={x} y={yBase} fill="var(--profit)" fontSize={10.5} fontFamily="Inter" fontWeight={600}>{`High ${money(peak)}`}</text>
+      {date && <text x={x} y={yBase + 13} fill="var(--profit)" fontSize={9.5} fontFamily="Inter" opacity={0.8}>{date}</text>}
     </g>
   );
 }
@@ -3252,21 +3401,196 @@ function ChangeMarkerLabel({ viewBox, note, onHover }) {
       style={{ cursor: "pointer" }}
     >
       <rect x={x - 18} y={y - 20} width={36} height={14} rx={3} fill="var(--bg)" stroke="var(--amber)" strokeWidth={1} />
-      <text x={x} y={y - 10} textAnchor="middle" fill="#D9A441" fontSize={9} fontFamily="JetBrains Mono" fontWeight={700}>change</text>
-      <circle cx={x} cy={y} r={3.5} fill="#D9A441" />
+      <text x={x} y={y - 10} textAnchor="middle" fill="var(--amber)" fontSize={9} fontFamily="Inter" fontWeight={700}>change</text>
+      <circle cx={x} cy={y} r={3.5} fill="var(--amber)" />
     </g>
   );
 }
 
-function EquityChart({ curve, color = "#D9A441", changeNotes = [] }) {
+const axisMoney = (v) => (v < 0 ? "-$" + Math.abs(v).toLocaleString() : "$" + v.toLocaleString());
+const AXIS_TICK = { fontSize: 11.5, fontFamily: "Inter, sans-serif", fill: "var(--text-dim)" };
+
+// ---------- chart controls ----------
+
+const HWM_COLOR = "#D99A00";
+const GROSS_COLOR = "#7C5CE0";
+const TREND_COLOR = "var(--text-dim)";
+const CHART_PREFS_KEY = "fj_chart_prefs_v1";
+const DEFAULT_CHART_PREFS = { view: "equity", trend: true, hwm: false, gross: false, x: "trades" };
+
+// Chart toggles are remembered on this device and shared by every P&L chart.
+function useChartPrefs() {
+  const [prefs, setPrefs] = useState(() => {
+    try { return { ...DEFAULT_CHART_PREFS, ...JSON.parse(localStorage.getItem(CHART_PREFS_KEY) || "{}") }; }
+    catch { return DEFAULT_CHART_PREFS; }
+  });
+  const update = (patch) => setPrefs((p) => {
+    const next = { ...p, ...patch };
+    try { localStorage.setItem(CHART_PREFS_KEY, JSON.stringify(next)); } catch { /* storage unavailable */ }
+    return next;
+  });
+  return [prefs, update];
+}
+
+// Least-squares trend through a curve, plus a short forward projection so the
+// line reads as "where this is heading", not just "where it's been".
+function withTrend(data, key, on) {
+  const pts = data.filter((p) => typeof p[key] === "number");
+  if (!on || pts.length < 3) return { chartData: data, slope: null };
+  const n = pts.length;
+  const mx = pts.reduce((a, p) => a + p.i, 0) / n;
+  const my = pts.reduce((a, p) => a + p[key], 0) / n;
+  let num = 0, den = 0;
+  pts.forEach((p) => { num += (p.i - mx) * (p[key] - my); den += (p.i - mx) ** 2; });
+  if (den === 0) return { chartData: data, slope: null };
+  const slope = num / den;
+  const intercept = my - slope * mx;
+  const lastI = pts[pts.length - 1].i;
+  const ext = Math.max(2, Math.round(n * 0.15));
+  const chartData = data.map((p) => ({ ...p, trend: intercept + slope * p.i }));
+  for (let k = 1; k <= ext; k++) chartData.push({ i: lastI + k, trend: intercept + slope * (lastI + k) });
+  return { chartData, slope };
+}
+
+// Adds the running peak (high-water mark) and the drawdown from it, then the
+// optional trend. Peak starts at 0 because every curve starts at 0.
+function prepareSeries(data, key, prefs) {
+  let peak = 0;
+  let maxDD = 0;
+  const base = data.map((p) => {
+    peak = Math.max(peak, p[key]);
+    const dd = Number((p[key] - peak).toFixed(2));
+    if (dd < maxDD) maxDD = dd;
+    return { ...p, hwm: peak, dd };
+  });
+  const hasFees = data.some((p) => typeof p.gross === "number" && Math.abs(p.gross - p[key]) > 0.005);
+  const { chartData, slope } = withTrend(base, key, prefs.view === "equity" && prefs.trend);
+  return { chartData, slope, hasFees, maxDD };
+}
+
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+function makeXTick(data, mode) {
+  if (mode !== "dates") return undefined;
+  const byI = new Map(data.map((p) => [p.i, p.date]));
+  return (v) => {
+    const d = byI.get(Math.round(v));
+    if (!d) return "";
+    const [y, m, day] = d.split("-");
+    return `${MONTHS[Number(m) - 1]} ${Number(day)}, '${y.slice(2)}`;
+  };
+}
+
+// A round lower bound for the drawdown axis, so ticks read -$10,000 not -$9,839.75.
+function niceDDFloor(maxDD) {
+  const v = Math.abs(maxDD) || 1;
+  const step = 10 ** Math.floor(Math.log10(v)) / 2;
+  return -Math.ceil(v / step) * step;
+}
+
+// Price-tag style pills on the Y axis: one per visible series, at the height of
+// its latest value, in the same color as its line. Pills that would land on top
+// of each other are nudged apart so every one stays readable.
+function fmtPill(v) {
+  const a = Math.abs(v);
+  const body = a >= 1e6 ? `${(a / 1e6).toFixed(2)}M` : Math.round(a).toLocaleString();
+  return `${v < 0 ? "-" : ""}$${body}`;
+}
+
+function YPills({ yAxisMap, offset, pills }) {
+  const axis = yAxisMap && Object.values(yAxisMap)[0];
+  if (!axis || !axis.scale || !offset) return null;
+  const H = 20, GAP = 2;
+  const top = offset.top, bottom = offset.top + offset.height;
+  const placed = pills
+    .filter((p) => typeof p.value === "number" && Number.isFinite(p.value))
+    .map((p) => ({ ...p, y: Math.min(bottom, Math.max(top, axis.scale(p.value))) }))
+    .sort((a, b) => a.y - b.y);
+  for (let k = 1; k < placed.length; k++) {
+    if (placed[k].y - placed[k - 1].y < H + GAP) placed[k].y = placed[k - 1].y + H + GAP;
+  }
+  for (let k = placed.length - 2; k >= 0; k--) {
+    if (placed[k + 1].y > bottom + H / 2) placed[k + 1].y = bottom + H / 2;
+    if (placed[k + 1].y - placed[k].y < H + GAP) placed[k].y = placed[k + 1].y - H - GAP;
+  }
+  const x = offset.left + offset.width + (axis.width || 0) + 4;
+  return (
+    <g style={{ pointerEvents: "none" }}>
+      {placed.map((p) => (
+        <g key={p.id}>
+          <rect x={x} y={p.y - H / 2} width={64} height={H} rx={H / 2} fill={p.fill} />
+          <text x={x + 32} y={p.y + 4} textAnchor="middle" fontSize={11.5} fontWeight={600} fontFamily="Inter, sans-serif" fill={p.text || "var(--on-accent)"}>{fmtPill(p.value)}</text>
+        </g>
+      ))}
+    </g>
+  );
+}
+
+function buildPills({ chartData, key, prefs, equityView, hasFees, slope, trendColor, maxDD }) {
+  const last = (k) => { for (let n = chartData.length - 1; n >= 0; n--) if (typeof chartData[n][k] === "number") return chartData[n][k]; return null; };
+  if (!equityView) {
+    return [
+      { id: "dd-now", value: last("dd"), fill: "var(--loss)" },
+      ...(maxDD < 0 && last("dd") !== maxDD ? [{ id: "dd-max", value: maxDD, fill: TREND_COLOR }] : []),
+    ];
+  }
+  return [
+    { id: "eq", value: last(key), fill: trendColor },
+    ...(prefs.trend && slope !== null ? [{ id: "trend", value: last("trend"), fill: TREND_COLOR }] : []),
+    ...(prefs.hwm ? [{ id: "hwm", value: last("hwm"), fill: HWM_COLOR, text: "#1A1200" }] : []),
+    ...(hasFees && prefs.gross ? [{ id: "gross", value: last("gross"), fill: GROSS_COLOR, text: "#fff" }] : []),
+  ];
+}
+
+function Tog({ on, onClick, title, color, children }) {
+  return (
+    <button className={`fj-tog ${on ? "on" : ""}`} onClick={onClick} aria-pressed={on} title={title} style={color ? { "--tog": color } : undefined}>
+      <span className="fj-tog-box" aria-hidden="true">
+        {on && <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1.5,5.5 4,8 8.5,2" /></svg>}
+      </span>
+      {children}
+    </button>
+  );
+}
+
+function ChartToolbar({ prefs, update, slope, hasFees, maxDD }) {
+  const equityView = prefs.view === "equity";
+  return (
+    <div className="fj-chart-bar">
+      <div className="fj-seg-toggle" role="group" aria-label="Chart view">
+        <button className={`fj-seg-btn ${equityView ? "active" : ""}`} onClick={() => update({ view: "equity" })}>Equity</button>
+        <button className={`fj-seg-btn ${!equityView ? "active" : ""}`} onClick={() => update({ view: "drawdown" })} title="How far below its previous peak the account sits at each point">Drawdown</button>
+      </div>
+      <div className="fj-chart-bar-right">
+        {equityView ? (
+          <>
+            <Tog color={TREND_COLOR} on={prefs.trend} onClick={() => update({ trend: !prefs.trend })} title="Straight-line fit through the curve, extended forward. A guide to direction, not a forecast.">
+              Trend
+              {prefs.trend && slope !== null && <b className={slope >= 0 ? "fj-profit" : "fj-loss"}>{slope >= 0 ? "+" : "-"}{money(Math.abs(slope))}/trade</b>}
+            </Tog>
+            <Tog color={HWM_COLOR} on={prefs.hwm} onClick={() => update({ hwm: !prefs.hwm })} title="The highest equity reached so far — the level a drawdown has to climb back to.">High-water mark</Tog>
+            {hasFees && <Tog color={GROSS_COLOR} on={prefs.gross} onClick={() => update({ gross: !prefs.gross })} title="Same trades before fees. The gap between the lines is what fees have cost.">Before fees</Tog>}
+          </>
+        ) : (
+          <span className="fj-sub">Max drawdown <b className="fj-loss">{money(maxDD)}</b></span>
+        )}
+        <div className="fj-seg-toggle" role="group" aria-label="X axis">
+          <button className={`fj-seg-btn ${prefs.x === "trades" ? "active" : ""}`} onClick={() => update({ x: "trades" })}>Trades</button>
+          <button className={`fj-seg-btn ${prefs.x === "dates" ? "active" : ""}`} onClick={() => update({ x: "dates" })}>Dates</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EquityChart({ curve, color = "var(--amber)", changeNotes = [] }) {
   const gradId = useId();
   const [hoveredMarker, setHoveredMarker] = useState(null);
+  const [prefs, update] = useChartPrefs();
   if (curve.length === 0) {
     return <div className="fj-empty">No trades yet — add one to start the equity curve.</div>;
   }
-  const peak = Math.max(...curve.map((p) => p.equity));
-  const peakPoint = curve.find((p) => p.equity === peak);
-  const stops = buildTrendGradientStops(curve, "equity");
+  const equityView = prefs.view === "equity";
+  const trendColor = curve[curve.length - 1].equity >= 0 ? "var(--profit)" : "var(--loss)";
 
   // Position each note at the boundary just before the FIRST real trade on
   // its date, not the last one on/before it — so every trade that date
@@ -3279,47 +3603,53 @@ function EquityChart({ curve, color = "#D9A441", changeNotes = [] }) {
       return { note: n, i };
     })
     .filter((m) => m.i !== undefined && m.i !== null && m.i >= 0);
+  const { chartData, slope, hasFees, maxDD } = prepareSeries(curve, "equity", prefs);
   const allVals = curve.map((p) => p.equity);
   const yMin = Math.min(0, ...allVals);
   const yMax = Math.max(0, ...allVals);
 
   return (
     <div style={{ position: "relative" }}>
+      <ChartToolbar prefs={prefs} update={update} slope={slope} hasFees={hasFees} maxDD={maxDD} />
       <ResponsiveContainer width="100%" height={220}>
-        <ComposedChart data={curve} margin={{ top: 26, right: 12, left: -10, bottom: 0 }}>
+        <ComposedChart data={chartData} margin={{ top: 26, right: 72, left: 0, bottom: 0 }}>
           <defs>
-            <linearGradient id={`eqFill-${gradId}`} x1="0" y1="0" x2="1" y2="0">
-              {stops.map((s, idx) => <stop key={idx} offset={s.offset} stopColor={s.color} stopOpacity={0.22} />)}
+            <linearGradient id={`eqFill-${gradId}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={equityView ? trendColor : "var(--loss)"} stopOpacity={0.2} />
+              <stop offset="100%" stopColor={equityView ? trendColor : "var(--loss)"} stopOpacity={0} />
             </linearGradient>
           </defs>
-          <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
-          <XAxis dataKey="i" type="number" stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-          <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
+          <CartesianGrid stroke="var(--border)" vertical={false} />
+          <XAxis dataKey="i" type="number" domain={["dataMin", "dataMax"]} axisLine={false} tickLine={false} tick={AXIS_TICK} tickMargin={8} tickFormatter={makeXTick(curve, prefs.x)} />
+          <YAxis orientation="right" axisLine={false} tickLine={false} tick={AXIS_TICK} tickFormatter={axisMoney} width={68} domain={equityView ? ["auto", "auto"] : [niceDDFloor(maxDD), 0]} />
           <Area
-            dataKey={(d) => d.equity} type="monotone" stroke="none"
+            dataKey={equityView ? "equity" : "dd"} type="monotone" stroke="none"
             fill={`url(#eqFill-${gradId})`} isAnimationActive={false} legendType="none"
           />
-          <ReferenceLine y={0} stroke="#3A4150" />
-          <ReferenceLine x={peakPoint?.i} stroke="#5FA37A" strokeDasharray="4 3" label={<HighLineLabel peak={peak} date={peakPoint?.date} />} />
-          {markers.map((m) => (
+          <ReferenceLine y={0} stroke="var(--border-strong)" />
+          {equityView && markers.map((m) => (
             <ReferenceLine
               key={m.note.id}
               segment={[{ x: m.i, y: yMin }, { x: m.i, y: yMax }]}
-              stroke="#D9A441" strokeOpacity={0.6} strokeDasharray="3 3"
+              stroke="var(--amber)" strokeOpacity={0.6} strokeDasharray="3 3"
               label={<ChangeMarkerLabel note={m.note} onHover={setHoveredMarker} />}
             />
           ))}
-          <Tooltip content={<ChartTooltip />} cursor={{ stroke: "#3A4150", strokeDasharray: "3 3" }} />
-          <Line type="monotone" dataKey="equity" stroke={color} strokeWidth={2} dot={false} />
+          <Tooltip content={<ChartTooltip />} cursor={{ stroke: "var(--border-strong)", strokeDasharray: "3 3" }} />
+          {equityView && prefs.hwm && <Line type="stepAfter" dataKey="hwm" stroke={HWM_COLOR} strokeWidth={1.75} strokeDasharray="2 4" dot={false} isAnimationActive={false} activeDot={false} />}
+          {equityView && hasFees && prefs.gross && <Line type="monotone" dataKey="gross" stroke={GROSS_COLOR} strokeWidth={1.5} dot={false} isAnimationActive={false} activeDot={false} />}
+          {equityView && slope !== null && <Line type="linear" dataKey="trend" stroke={TREND_COLOR} strokeWidth={1.75} strokeDasharray="6 5" dot={false} isAnimationActive={false} activeDot={false} legendType="none" />}
+          <Line type="monotone" dataKey={equityView ? "equity" : "dd"} stroke={equityView ? trendColor : "var(--loss)"} strokeWidth={2.25} dot={false} isAnimationActive={false} activeDot={{ r: 4, strokeWidth: 2, stroke: "var(--panel)" }} />
+          <Customized component={YPills} pills={buildPills({ chartData, key: "equity", prefs, equityView, hasFees, slope, trendColor, maxDD })} />
         </ComposedChart>
       </ResponsiveContainer>
-      {hoveredMarker && (
+      {hoveredMarker && equityView && (
         <div style={{
           position: "absolute", left: Math.max(hoveredMarker.x - 100, 4), top: hoveredMarker.y + 6,
           background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, padding: "9px 11px",
           fontSize: 12, width: 210, zIndex: 10, pointerEvents: "none", boxShadow: "0 4px 14px rgba(0,0,0,0.45)",
         }}>
-          <div style={{ fontFamily: "'JetBrains Mono', monospace", color: "#D9A441", fontSize: 10.5, marginBottom: 3 }}>{hoveredMarker.note.date}</div>
+          <div style={{ fontFamily: "'Inter', sans-serif", color: "var(--amber)", fontSize: 10.5, marginBottom: 3 }}>{hoveredMarker.note.date}</div>
           <div style={{ fontFamily: "Inter, sans-serif", fontWeight: 600, color: "var(--text-bright)", marginBottom: hoveredMarker.note.body ? 4 : 0 }}>{hoveredMarker.note.title}</div>
           {hoveredMarker.note.body && <div style={{ fontFamily: "Inter, sans-serif", color: "var(--text-dim)", lineHeight: 1.4, fontSize: 11.5 }}>{hoveredMarker.note.body}</div>}
         </div>
@@ -3328,38 +3658,46 @@ function EquityChart({ curve, color = "#D9A441", changeNotes = [] }) {
   );
 }
 
-function PortfolioEquityChart({ data, strategies, visible, colorFor }) {
+function PortfolioEquityChart({ data, strategies, visible, colorFor, height = 300 }) {
   const gradId = useId();
+  const [prefs, update] = useChartPrefs();
   if (!data || data.length === 0) {
-    return <div className="fj-empty">No trades yet — add one to start the equity curve.</div>;
+    return <div className="fj-empty">No trades in this range — add one or pick a longer range.</div>;
   }
-  const peak = Math.max(...data.map((p) => p.portfolio));
-  const peakPoint = data.find((p) => p.portfolio === peak);
-  const stops = buildTrendGradientStops(data, "portfolio");
+  const equityView = prefs.view === "equity";
+  const trendColor = data[data.length - 1].portfolio >= 0 ? "var(--profit)" : "var(--loss)";
+  const { chartData, slope, hasFees, maxDD } = prepareSeries(data, "portfolio", prefs);
   return (
-    <ResponsiveContainer width="100%" height={260}>
-      <ComposedChart data={data} margin={{ top: 8, right: 12, left: -10, bottom: 0 }}>
-        <defs>
-          <linearGradient id={`pfFill-${gradId}`} x1="0" y1="0" x2="1" y2="0">
-            {stops.map((s, idx) => <stop key={idx} offset={s.offset} stopColor={s.color} stopOpacity={0.2} />)}
-          </linearGradient>
-        </defs>
-        <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
-        <XAxis dataKey="i" type="number" stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-        <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-        <Area
-          dataKey={(d) => d.portfolio} type="monotone" stroke="none"
-          fill={`url(#pfFill-${gradId})`} isAnimationActive={false} legendType="none"
-        />
-        <ReferenceLine y={0} stroke="#3A4150" />
-        <ReferenceLine x={peakPoint?.i} stroke="#5FA37A" strokeDasharray="4 3" label={<HighLineLabel peak={peak} date={peakPoint?.date} />} />
-        <Tooltip content={<ChartTooltip />} cursor={{ stroke: "#3A4150", strokeDasharray: "3 3" }} />
-        {strategies.filter((s) => visible.includes(s)).map((s) => (
-          <Line key={s} type="monotone" dataKey={s} stroke={colorFor(s)} strokeWidth={1.5} strokeOpacity={0.5} dot={false} isAnimationActive={false} />
-        ))}
-        <Line type="monotone" dataKey="portfolio" stroke="#D9A441" strokeWidth={2.5} dot={false} isAnimationActive={false} />
-      </ComposedChart>
-    </ResponsiveContainer>
+    <div style={{ position: "relative" }}>
+      <ChartToolbar prefs={prefs} update={update} slope={slope} hasFees={hasFees} maxDD={maxDD} />
+      <ResponsiveContainer width="100%" height={height}>
+        <ComposedChart data={chartData} margin={{ top: 8, right: 72, left: 0, bottom: 0 }}>
+          <defs>
+            <linearGradient id={`pfFill-${gradId}`} x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={equityView ? trendColor : "var(--loss)"} stopOpacity={0.2} />
+              <stop offset="100%" stopColor={equityView ? trendColor : "var(--loss)"} stopOpacity={0} />
+            </linearGradient>
+          </defs>
+          <CartesianGrid stroke="var(--border)" vertical={false} />
+          <XAxis dataKey="i" type="number" domain={["dataMin", "dataMax"]} axisLine={false} tickLine={false} tick={AXIS_TICK} tickMargin={8} tickFormatter={makeXTick(data, prefs.x)} />
+          <YAxis orientation="right" axisLine={false} tickLine={false} tick={AXIS_TICK} tickFormatter={axisMoney} width={68} domain={equityView ? ["auto", "auto"] : [niceDDFloor(maxDD), 0]} />
+          <Area
+            dataKey={equityView ? "portfolio" : "dd"} type="monotone" stroke="none"
+            fill={`url(#pfFill-${gradId})`} isAnimationActive={false} legendType="none"
+          />
+          <ReferenceLine y={0} stroke="var(--border-strong)" />
+          <Tooltip content={<ChartTooltip />} cursor={{ stroke: "var(--border-strong)", strokeDasharray: "3 3" }} />
+          {equityView && strategies.filter((st) => visible.includes(st)).map((st) => (
+            <Line key={st} type="monotone" dataKey={st} stroke={colorFor(st)} strokeWidth={1.75} strokeOpacity={0.9} dot={false} isAnimationActive={false} />
+          ))}
+          {equityView && prefs.hwm && <Line type="stepAfter" dataKey="hwm" stroke={HWM_COLOR} strokeWidth={1.75} strokeDasharray="2 4" dot={false} isAnimationActive={false} activeDot={false} />}
+          {equityView && hasFees && prefs.gross && <Line type="monotone" dataKey="gross" stroke={GROSS_COLOR} strokeWidth={1.5} dot={false} isAnimationActive={false} activeDot={false} />}
+          {equityView && slope !== null && <Line type="linear" dataKey="trend" stroke={TREND_COLOR} strokeWidth={1.75} strokeDasharray="6 5" dot={false} isAnimationActive={false} activeDot={false} legendType="none" />}
+          <Line type="monotone" dataKey={equityView ? "portfolio" : "dd"} stroke={equityView ? trendColor : "var(--loss)"} strokeWidth={2.5} dot={false} isAnimationActive={false} activeDot={{ r: 4.5, strokeWidth: 2, stroke: "var(--panel)" }} />
+          <Customized component={YPills} pills={buildPills({ chartData, key: "portfolio", prefs, equityView, hasFees, slope, trendColor, maxDD })} />
+        </ComposedChart>
+      </ResponsiveContainer>
+    </div>
   );
 }
 
@@ -3394,11 +3732,127 @@ function SortToggle({ value, onChange }) {
   );
 }
 
+function GroupTable({ rows, showGrade, onSelect, selected = [], onToggle, colorFor, pageSize = 8, emptyText }) {
+  const [sortKey, setSortKey] = useState("pnl");
+  const [sortDir, setSortDir] = useState("desc");
+  const [showAll, setShowAll] = useState(false);
+  const pfVal = (st) => (st.profitFactor === null ? -1 : st.profitFactor === Infinity ? 1e9 : st.profitFactor);
+  const sorted = useMemo(() => {
+    const get = (r) => ({ name: r.key.toLowerCase(), pnl: r.stats.totalPnl, win: r.stats.n ? r.stats.winRate : -1, pf: pfVal(r.stats), trades: r.stats.n, fees: r.stats.totalFees || 0 })[sortKey];
+    const dir = sortDir === "desc" ? -1 : 1;
+    return [...rows].sort((x, y) => { const a = get(x), b = get(y); return (a < b ? -1 : a > b ? 1 : 0) * dir; });
+  }, [rows, sortKey, sortDir]);
+  const visible = showAll ? sorted : sorted.slice(0, pageSize);
+  const clickSort = (k) => {
+    if (k === sortKey) setSortDir((d) => (d === "desc" ? "asc" : "desc"));
+    else { setSortKey(k); setSortDir(k === "name" ? "asc" : "desc"); }
+  };
+  const Th = ({ k, children, right, cls }) => (
+    <th className={cls} style={{ textAlign: right ? "right" : "left" }} aria-sort={sortKey === k ? (sortDir === "desc" ? "descending" : "ascending") : "none"}>
+      <button className={`fj-th-btn ${sortKey === k ? "on" : ""}`} onClick={() => clickSort(k)}>
+        {children}{sortKey === k ? (sortDir === "desc" ? " ↓" : " ↑") : ""}
+      </button>
+    </th>
+  );
+  if (rows.length === 0) return <div className="fj-empty">{emptyText}</div>;
+  return (
+    <div>
+      <div className="fj-table-wrap">
+        <table className="fj-table fj-group-table">
+          <thead>
+            <tr>
+              {onToggle && <th style={{ width: 34 }} aria-label="Compare on chart" />}
+              <Th k="name">Name</Th>
+              {showGrade && <th style={{ width: 54 }}>Grade</th>}
+              <Th k="pnl" right>Net P&amp;L</Th>
+              <th className="fj-col-trend" style={{ width: 100 }}>Equity</th>
+              <Th k="win" right cls="fj-col-sec">Win rate</Th>
+              <Th k="pf" right cls="fj-col-sec">Profit factor</Th>
+              <Th k="trades" right>Trades</Th>
+              <Th k="fees" right cls="fj-col-sec">Fees</Th>
+            </tr>
+          </thead>
+          <tbody>
+            {visible.map((r) => {
+              const up = r.stats.totalPnl >= 0;
+              const picked = selected.includes(r.key);
+              return (
+                <tr key={r.key} className={`fj-row-click ${picked ? "picked" : ""}`} onClick={() => onSelect(r.key)}>
+                  {onToggle && (
+                    <td onClick={(e) => e.stopPropagation()}>
+                      <input
+                        type="checkbox" checked={picked} onChange={() => onToggle(r.key)}
+                        aria-label={`Compare ${r.key} on the chart`} title="Overlay on the chart"
+                        style={{ accentColor: colorFor ? colorFor(r.key) : undefined }}
+                      />
+                    </td>
+                  )}
+                  <td>
+                    <span className="fj-name-cell">
+                      <span className="fj-dot" style={{ background: r.accent || (colorFor ? colorFor(r.key) : "var(--text-dim)") }} />
+                      {r.key}
+                    </span>
+                  </td>
+                  {showGrade && <td>{r.grade && <GradeBadge grade={r.grade} size="sm" />}</td>}
+                  <td style={{ textAlign: "right", fontWeight: 600 }} className={r.stats.n === 0 ? "fj-neutral" : up ? "fj-profit" : "fj-loss"}>{r.stats.n === 0 ? "—" : money(r.stats.totalPnl)}</td>
+                  <td className="fj-col-trend">
+                    {r.curve && r.curve.length > 1 && (
+                      <LineChart width={92} height={26} data={r.curve} margin={{ top: 3, right: 2, left: 2, bottom: 3 }}>
+                        <YAxis hide domain={["dataMin", "dataMax"]} />
+                        <Line type="monotone" dataKey="equity" stroke={up ? "var(--profit)" : "var(--loss)"} strokeWidth={1.75} dot={false} isAnimationActive={false} />
+                      </LineChart>
+                    )}
+                  </td>
+                  <td className="fj-col-sec" style={{ textAlign: "right" }}>{r.stats.n ? pct(r.stats.winRate) : "—"}</td>
+                  <td className="fj-col-sec" style={{ textAlign: "right" }}>{r.stats.profitFactor === null ? "—" : r.stats.profitFactor === Infinity ? "∞" : r.stats.profitFactor.toFixed(2)}</td>
+                  <td style={{ textAlign: "right" }}>{r.stats.n}</td>
+                  <td className="fj-col-sec fj-neutral" style={{ textAlign: "right" }}>{r.stats.totalFees > 0 ? money(r.stats.totalFees) : "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {sorted.length > pageSize && (
+        <button className="fj-more-btn" onClick={() => setShowAll((v) => !v)}>
+          {showAll ? "Show fewer" : `Show all ${sorted.length}`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+const HOME_RANGES = [
+  ["1D", "Latest day"], ["1W", "Past week"], ["1M", "Past month"], ["3M", "Past 3 months"], ["YTD", "Year to date"], ["ALL", "All time"],
+];
+
+function rangeCutoff(anchor, key) {
+  if (!anchor || key === "ALL") return null;
+  if (key === "1D") return anchor;
+  if (key === "YTD") return `${anchor.slice(0, 4)}-01-01`;
+  const days = key === "1W" ? 6 : key === "1M" ? 29 : 89;
+  const d = new Date(anchor + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
 function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAccounts }) {
   const [selectedStrategies, setSelectedStrategies] = useState([]);
   const [category, setCategory] = useState("all"); // all | micro | mini
-  const [marketSort, setMarketSort] = useState("pnl");
-  const [strategySort, setStrategySort] = useState("pnl");
+  const [tab, setTab] = useState("strategies"); // strategies | markets | breakdown
+  const [range, setRange] = useState("ALL");
+
+  // The range pills count back from the most recent real trade, not today's
+  // date, so "Past week" always shows the last stretch you actually traded.
+  const anchorDate = useMemo(() => {
+    let max = "";
+    trades.forEach((t) => { if (!t._isCopy && t.date && t.date > max) max = t.date; });
+    return max;
+  }, [trades]);
+  const rangedTrades = useMemo(() => {
+    const cutoff = rangeCutoff(anchorDate, range);
+    return cutoff ? trades.filter((t) => t.date >= cutoff) : trades;
+  }, [trades, anchorDate, range]);
 
   const hasMicro = Object.values(settings).some((m) => (m.category || "micro") === "micro");
   const hasMini = Object.values(settings).some((m) => m.category === "mini");
@@ -3410,18 +3864,18 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
   // under a second strategy name, not a new position, so the real portfolio
   // total must never count it twice.
   const categoryScopedTrades = useMemo(() => {
-    const real = trades.filter((t) => !t._isCopy);
+    const real = rangedTrades.filter((t) => !t._isCopy);
     if (category === "all") return real;
     return real.filter((t) => (settings[t.market]?.category || "micro") === category);
-  }, [trades, settings, category]);
+  }, [rangedTrades, settings, category]);
 
   // Same category scope, but keeping copies in — needed only for the
   // per-strategy breakdown below, where a copy legitimately belongs under
   // its new strategy's own numbers.
   const categoryScopedTradesWithCopies = useMemo(() => {
-    if (category === "all") return trades;
-    return trades.filter((t) => (settings[t.market]?.category || "micro") === category);
-  }, [trades, settings, category]);
+    if (category === "all") return rangedTrades;
+    return rangedTrades.filter((t) => (settings[t.market]?.category || "micro") === category);
+  }, [rangedTrades, settings, category]);
 
   // Category + selected-strategy scope — drives the stat grid and the main
   // equity curve, so picking strategy chips actually narrows the numbers,
@@ -3435,6 +3889,12 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
   }, [categoryScopedTrades, categoryScopedTradesWithCopies, selectedStrategies]);
 
   const stats = useMemo(() => calcStats(statsScopedTrades), [statsScopedTrades]);
+  const lastSession = useMemo(() => {
+    let max = "";
+    statsScopedTrades.forEach((t) => { if (t.date && t.date > max) max = t.date; });
+    if (!max) return null;
+    return { date: max, pnl: statsScopedTrades.filter((t) => t.date === max).reduce((s, t) => s + (Number(t.pnl) || 0), 0) };
+  }, [statsScopedTrades]);
   const multiCurve = useMemo(() => buildMultiEquityCurve(statsScopedTrades, strategies), [statsScopedTrades, strategies]);
   const longStats = useMemo(() => calcStats(statsScopedTrades.filter((t) => t.direction === "Long")), [statsScopedTrades]);
   const shortStats = useMemo(() => calcStats(statsScopedTrades.filter((t) => t.direction === "Short")), [statsScopedTrades]);
@@ -3444,10 +3904,10 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
       .filter((m) => category === "all" || (settings[m].category || "micro") === category)
       .map((m) => {
         const marketTrades = categoryScopedTrades.filter((t) => t.market === m);
-        return { key: m, ...settings[m], stats: calcStats(marketTrades) };
+        return { key: m, ...settings[m], stats: calcStats(marketTrades), curve: equityCurve(marketTrades) };
       });
-    return sortGroups(list, marketSort);
-  }, [settings, categoryScopedTrades, category, marketSort]);
+    return list;
+  }, [settings, categoryScopedTrades, category]);
 
   const byStrategy = useMemo(() => {
     const names = Array.from(new Set(categoryScopedTradesWithCopies.map((t) => t.strategy).filter(Boolean)));
@@ -3456,8 +3916,8 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
         const stratTrades = categoryScopedTradesWithCopies.filter((t) => t.strategy === s);
         return { key: s, stats: calcStats(stratTrades), curve: equityCurve(stratTrades), grade: computeStrategyGrade(stratTrades, { settings }) };
       });
-    return sortGroups(list, strategySort);
-  }, [categoryScopedTradesWithCopies, strategySort, settings]);
+    return list;
+  }, [categoryScopedTradesWithCopies, settings]);
 
   const acctRollup = useMemo(() => {
     if (accounts.length === 0) return null;
@@ -3477,142 +3937,101 @@ function HomeView({ settings, trades, accounts, strategies, onSelect, onViewAcco
 
   return (
     <div>
-      {(hasMicro && hasMini) && (
-        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 12 }}>
-          <div className="fj-seg-toggle">
-            <button className={`fj-seg-btn ${category === "all" ? "active" : ""}`} onClick={() => setCategory("all")}>All contracts</button>
-            <button className={`fj-seg-btn ${category === "micro" ? "active" : ""}`} onClick={() => setCategory("micro")}>Micro only</button>
-            <button className={`fj-seg-btn ${category === "mini" ? "active" : ""}`} onClick={() => setCategory("mini")}>Mini only</button>
-          </div>
-        </div>
-      )}
-
-      <StatGrid stats={stats} />
-
-      <div className="fj-panel">
-        <p className="fj-panel-title">Equity curve</p>
-        {strategies.length > 0 && (
-          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, alignItems: "center", marginBottom: 10 }}>
-            <span className="fj-sub" style={{ marginRight: 2 }}>Filter by strategy:</span>
-            {strategies.map((s) => {
-              const active = selectedStrategies.includes(s);
-              const c = colorFor(s);
-              return (
-                <span
-                  key={s}
-                  className="fj-chip"
-                  style={active ? { background: c, borderColor: c, color: "#14161B", fontWeight: 600 } : undefined}
-                  onClick={() => toggleStrategy(s)}
-                >
-                  {s}
+      <div className="fj-dash-grid">
+        <div className="fj-hero">
+          <div className="fj-hero-top">
+            <div>
+              <div className="fj-hero-label">Net P&amp;L{selectedStrategies.length > 0 ? ` · ${selectedStrategies.length} selected` : ""}</div>
+              <div className={`fj-hero-value ${stats.n === 0 ? "fj-neutral" : stats.totalPnl >= 0 ? "fj-profit" : "fj-loss"}`}>
+                {stats.n ? money(stats.totalPnl) : "$0.00"}
+              </div>
+              <div className="fj-hero-delta">
+                {lastSession && (
+                  <span className={`fj-delta-chip ${lastSession.pnl >= 0 ? "up" : "down"}`}>
+                    {lastSession.pnl >= 0 ? <TrendingUp size={14} /> : <TrendingDown size={14} />} {money(lastSession.pnl)}
+                  </span>
+                )}
+                <span className="fj-hero-meta">
+                  {lastSession ? `latest session, ${lastSession.date} · ` : ""}{stats.n} trade{stats.n === 1 ? "" : "s"}, {HOME_RANGES.find(([k]) => k === range)[1].toLowerCase()}
                 </span>
-              );
-            })}
-            {selectedStrategies.length > 0 && (
-              <span className="fj-chip" onClick={() => setSelectedStrategies([])}>Clear</span>
+              </div>
+            </div>
+            {(hasMicro && hasMini) && (
+              <div className="fj-seg-toggle">
+                <button className={`fj-seg-btn ${category === "all" ? "active" : ""}`} onClick={() => setCategory("all")}>All contracts</button>
+                <button className={`fj-seg-btn ${category === "micro" ? "active" : ""}`} onClick={() => setCategory("micro")}>Micro</button>
+                <button className={`fj-seg-btn ${category === "mini" ? "active" : ""}`} onClick={() => setCategory("mini")}>Mini</button>
+              </div>
             )}
           </div>
-        )}
-        <PortfolioEquityChart data={multiCurve} strategies={strategies} visible={selectedStrategies} colorFor={colorFor} />
+
+          <div className="fj-hero-chart">
+            <PortfolioEquityChart data={multiCurve} strategies={strategies} visible={selectedStrategies} colorFor={colorFor} height={280} />
+          </div>
+
+          <div className="fj-hero-foot">
+            <div className="fj-pills" role="group" aria-label="Time range">
+              {HOME_RANGES.map(([key, label]) => (
+                <button key={key} className={`fj-pill ${range === key ? "active" : ""}`} onClick={() => setRange(key)} title={label} aria-pressed={range === key}>{key}</button>
+              ))}
+            </div>
+            {selectedStrategies.length > 0 && (
+              <button className="fj-chip" onClick={() => setSelectedStrategies([])}>Clear {selectedStrategies.length} compared</button>
+            )}
+          </div>
+        </div>
+
+        <aside className="fj-side">
+          <StatList stats={stats} />
+          {acctRollup && (
+            <button className="fj-side-link" onClick={onViewAccounts}>
+              <span>
+                <span className="fj-sub">Accounts · {accounts.length}</span>
+                <b style={{ display: "block", fontSize: 17, marginTop: 2 }}>{money(acctRollup.currentTotal)}</b>
+              </span>
+              <span className={acctRollup.breachedCount > 0 ? "fj-loss" : "fj-neutral"} style={{ fontSize: 12.5, fontWeight: 600 }}>
+                {acctRollup.breachedCount > 0 ? `${acctRollup.breachedCount} below floor` : "All above floor"} ›
+              </span>
+            </button>
+          )}
+        </aside>
       </div>
 
-      {acctRollup && (
-        <div className="fj-panel" style={{ cursor: "pointer" }} onClick={onViewAccounts}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <p className="fj-panel-title" style={{ margin: 0 }}>Accounts</p>
-            <span className="fj-sub">{accounts.length} account{accounts.length === 1 ? "" : "s"} · view all →</span>
-          </div>
-          <div className="fj-stat-grid" style={{ marginTop: 12, marginBottom: 0 }}>
-            <div className="fj-stat-card">
-              <div className="fj-stat-label">Total current balance</div>
-              <div className="fj-stat-value">{money(acctRollup.currentTotal)}</div>
+      <div className="fj-tabbar">
+        <div className="fj-pills" role="tablist">
+          {[["strategies", `Strategies · ${byStrategy.length}`], ["markets", `Markets · ${byMarket.length}`], ["breakdown", "Breakdown"]].map(([k, label]) => (
+            <button key={k} role="tab" aria-selected={tab === k} className={`fj-pill lg ${tab === k ? "active" : ""}`} onClick={() => setTab(k)}>{label}</button>
+          ))}
+        </div>
+        {tab === "strategies" && byStrategy.length > 0 && <span className="fj-sub">Tick a box to compare on the chart. Select a row to open it.</span>}
+        {tab === "markets" && <span className="fj-sub">Select a market to open it.</span>}
+      </div>
+
+      {tab === "strategies" && (
+        <GroupTable
+          rows={byStrategy} showGrade colorFor={colorFor}
+          selected={selectedStrategies} onToggle={toggleStrategy}
+          onSelect={(k) => onSelect("strategy", k)}
+          emptyText="No strategies logged yet."
+        />
+      )}
+      {tab === "markets" && (
+        <GroupTable rows={byMarket} onSelect={(k) => onSelect("market", k)} emptyText="No markets yet." pageSize={12} />
+      )}
+      {tab === "breakdown" && (
+        <div className="fj-two-col">
+          {stats.n > 0 && (
+            <div style={{ gridColumn: "1 / -1" }}>
+              <h3 className="fj-sub-title">Long vs short</h3>
+              <LongShortTable longStats={longStats} shortStats={shortStats} />
             </div>
-            <div className="fj-stat-card">
-              <div className="fj-stat-label">Below floor</div>
-              <div className={`fj-stat-value ${acctRollup.breachedCount > 0 ? "fj-loss" : "fj-profit"}`}>{acctRollup.breachedCount}</div>
-            </div>
+          )}
+          <div style={{ gridColumn: "1 / -1" }}>
+            <h3 className="fj-sub-title">Stats by time window</h3>
+            <WindowStatsPanel trades={statsScopedTrades} />
           </div>
         </div>
       )}
-
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginTop: 22, marginBottom: 10 }}>
-        <div className="fj-section-label" style={{ margin: 0 }}>Markets — click to break down</div>
-        <SortToggle value={marketSort} onChange={setMarketSort} />
-      </div>
-      <div className="fj-ticker" style={{ marginBottom: 22 }}>
-        {byMarket.map((m) => {
-          const isProfit = m.stats.totalPnl >= 0;
-          return (
-            <div
-              key={m.key}
-              className="fj-ticker-card"
-              style={{ "--dot": m.accent }}
-              onClick={() => onSelect("market", m.key)}
-            >
-              <div className="fj-ticker-top">
-                <span className="fj-ticker-sym"><span className="fj-dot" style={{ background: m.accent }} />{m.key}</span>
-                {m.stats.n > 0 && (isProfit ? <TrendingUp size={14} color="#5FA37A" /> : <TrendingDown size={14} color="#C2634A" />)}
-              </div>
-              <div className={`fj-ticker-pnl ${m.stats.n === 0 ? "fj-neutral" : isProfit ? "fj-profit" : "fj-loss"}`}>
-                {m.stats.n === 0 ? "—" : money(m.stats.totalPnl)}
-              </div>
-              <div className="fj-ticker-meta">{m.stats.n} trade{m.stats.n === 1 ? "" : "s"} · {m.stats.n ? pct(m.stats.winRate) + " win" : "no data"}</div>
-            </div>
-          );
-        })}
-      </div>
-
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginTop: 22, marginBottom: 10 }}>
-        <div className="fj-section-label" style={{ margin: 0 }}>Strategies — click to break down</div>
-        <SortToggle value={strategySort} onChange={setStrategySort} />
-      </div>
-      {byStrategy.length === 0 ? (
-        <div className="fj-empty">No strategies logged yet.</div>
-      ) : (
-        <div className="fj-cards-grid">
-          {byStrategy.map((s) => {
-            const isProfit = s.stats.totalPnl >= 0;
-            return (
-              <div key={s.key} className="fj-strat-card fj-strat-card-clickable" onClick={() => onSelect("strategy", s.key)}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-                  <div className="fj-strat-name">{s.key}</div>
-                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <GradeBadge grade={s.grade} size="sm" />
-                    {isProfit ? <TrendingUp size={14} color="#5FA37A" /> : <TrendingDown size={14} color="#C2634A" />}
-                  </div>
-                </div>
-                <div className={`fj-strat-pnl-big ${isProfit ? "fj-profit" : "fj-loss"}`}>{money(s.stats.totalPnl)}</div>
-                <div className="fj-strat-meta-row">
-                  <span>{pct(s.stats.winRate)} win</span>
-                  <span>{s.stats.n} trades</span>
-                  {s.stats.totalFees > 0 && <span title="Total fees paid — P&L shown is after fees">fees {money(s.stats.totalFees)}</span>}
-                  <span>PF {s.stats.profitFactor === null ? "—" : s.stats.profitFactor === Infinity ? "∞" : s.stats.profitFactor.toFixed(2)}</span>
-                </div>
-                <ResponsiveContainer width="100%" height={40}>
-                  <LineChart data={s.curve} margin={{ top: 6, right: 0, left: 0, bottom: 0 }}>
-                    <YAxis hide domain={["dataMin", "dataMax"]} />
-                    <Line type="monotone" dataKey="equity" stroke={isProfit ? "#5FA37A" : "#C2634A"} strokeWidth={1.75} dot={false} isAnimationActive={false} />
-                  </LineChart>
-                </ResponsiveContainer>
-              </div>
-            );
-          })}
-        </div>
-      )}
-
-      {stats.n > 0 && (
-        <>
-          <div className="fj-section-label">Long vs Short</div>
-          <div className="fj-panel">
-            <LongShortTable longStats={longStats} shortStats={shortStats} />
-          </div>
-        </>
-      )}
-
-      <div className="fj-section-label">Advanced stats</div>
-      <div className="fj-panel">
-        <WindowStatsPanel trades={statsScopedTrades} />
-      </div>
     </div>
   );
 }
@@ -3896,7 +4315,7 @@ function AccountBar({ min, current, max, currentLabel, minLabel, maxLabel }) {
         <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${pct}%`, borderRadius: 6, background: zoneColor, transition: "width .2s" }} />
         <div style={{ position: "absolute", left: `${pct}%`, top: -4, transform: "translateX(-50%)", width: 2, height: 18, background: "var(--text-bright)" }} />
       </div>
-      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5, fontSize: 10.5, fontFamily: "JetBrains Mono, monospace" }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 5, fontSize: 10.5, fontFamily: "Inter, sans-serif" }}>
         <span style={{ color: "var(--text-dim)" }}>{minLabel}<br /><b style={{ color: "var(--text)" }}>{money(min)}</b></span>
         <span style={{ color: "var(--text-dim)", textAlign: "center" }}>{currentLabel}<br /><b style={{ color: zoneColor }}>{money(current)}</b></span>
         <span style={{ color: "var(--text-dim)", textAlign: "right" }}>{maxLabel}<br /><b style={{ color: "var(--text)" }}>{money(max)}</b></span>
@@ -3976,7 +4395,7 @@ function AccountCard({ account, trades, onRemove, onUpdate, onAddPayout, onRemov
         <ResponsiveContainer width="100%" height={40}>
           <LineChart data={equityCurveData} margin={{ top: 4, right: 0, left: 0, bottom: 0 }}>
             <YAxis hide domain={["dataMin", "dataMax"]} />
-            <Line type="monotone" dataKey="balance" stroke={curveTrendUp ? "#5FA37A" : "#C2634A"} strokeWidth={1.75} dot={false} isAnimationActive={false} />
+            <Line type="monotone" dataKey="balance" stroke={curveTrendUp ? "var(--profit)" : "var(--loss)"} strokeWidth={1.75} dot={false} isAnimationActive={false} />
           </LineChart>
         </ResponsiveContainer>
       )}
@@ -4192,7 +4611,7 @@ function NoteRow({ note, onEdit, onDelete, colSpan }) {
       <tr style={{ background: "var(--panel-alt)" }}>
         <td colSpan={colSpan} style={{ padding: "6px 10px", cursor: "pointer" }} onClick={() => setOpen((o) => !o)}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, fontFamily: "Inter, sans-serif" }}>
-            <span style={{ fontFamily: "'JetBrains Mono', monospace", color: "var(--text-dim)", fontSize: 12 }}>{note.date}</span>
+            <span style={{ fontFamily: "'Inter', sans-serif", color: "var(--text-dim)", fontSize: 12 }}>{note.date}</span>
             <span className={`fj-badge ${note.category === "general" ? "cash" : "eval"}`} style={{ marginTop: 0 }}>{NOTE_CATEGORY_LABEL[note.category] || note.category}</span>
             <span style={{ fontWeight: 600, fontSize: 13, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{note.title}</span>
             {open ? <ChevronUp size={13} color="var(--text-dim)" /> : <ChevronDown size={13} color="var(--text-dim)" />}
@@ -4538,20 +4957,7 @@ function CalendarView({ trades, strategies, settings }) {
     <div>
       <div className="fj-panel">
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 10, marginBottom: 6 }}>
-          <span className="fj-sub">Strategy:</span>
-          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", flex: 1 }}>
-            {strategies.map((s) => {
-              const active = selectedStrategies.includes(s);
-              return (
-                <span key={s} className={`fj-chip ${active ? "active" : ""}`} onClick={() => toggleStrategy(s)}>
-                  {s}
-                </span>
-              );
-            })}
-            {selectedStrategies.length > 0 && (
-              <span className="fj-chip" onClick={() => setSelectedStrategies([])}>Clear</span>
-            )}
-          </div>
+          <MultiPick label="Strategy" options={strategies} selected={selectedStrategies} onToggle={toggleStrategy} onClear={() => setSelectedStrategies([])} />
           {(hasMicro && hasMini) && (
             <div className="fj-seg-toggle">
               <button className={`fj-seg-btn ${category === "all" ? "active" : ""}`} onClick={() => setCategory("all")}>All contracts</button>
@@ -4785,24 +5191,24 @@ function WindowStatsPanel({ trades }) {
           <ResponsiveContainer width="100%" height={190}>
             <BarChart data={barData} margin={{ top: 4, right: 8, left: -10, bottom: 0 }}>
               <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
-              <XAxis dataKey="name" stroke="var(--text-dim)" tick={{ fontSize: 10.5, fontFamily: "JetBrains Mono" }} interval={0} angle={rows.length > 8 ? -40 : 0} textAnchor={rows.length > 8 ? "end" : "middle"} height={rows.length > 8 ? 55 : 30} />
-              <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-              <ReferenceLine y={0} stroke="#3A4150" />
+              <XAxis dataKey="name" stroke="var(--text-dim)" tick={{ fontSize: 10.5, fontFamily: "Inter" }} interval={0} angle={rows.length > 8 ? -40 : 0} textAnchor={rows.length > 8 ? "end" : "middle"} height={rows.length > 8 ? 55 : 30} />
+              <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "Inter" }} />
+              <ReferenceLine y={0} stroke="var(--border-strong)" />
               <Tooltip
-                contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+                contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "Inter", fontSize: 12 }}
                 labelStyle={{ color: "var(--text-bright)", fontWeight: 600, marginBottom: 4 }}
                 itemStyle={{ color: "var(--text-bright)" }}
                 cursor={{ fill: "rgba(139,146,158,0.08)" }}
                 formatter={(v) => [money(v), "P&L"]}
               />
               <Bar dataKey="pnl" radius={[4, 4, 0, 0]}>
-                {barData.map((d, i) => <Cell key={i} fill={d.pnl >= 0 ? "#5FA37A" : "#C2634A"} />)}
+                {barData.map((d, i) => <Cell key={i} fill={d.pnl >= 0 ? "var(--profit)" : "var(--loss)"} />)}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
 
           <div style={{ overflowX: "auto", marginTop: 12 }}>
-            <table className="fj-table">
+            <div className="fj-scroll-y"><table className="fj-table">
               <thead>
                 <tr>
                   <th>Window</th><th>Trades</th><th>Win %</th><th>P&amp;L</th><th>Avg P&amp;L</th><th>Avg Win</th><th>Avg Loss</th><th>Profit Factor</th>
@@ -4822,7 +5228,7 @@ function WindowStatsPanel({ trades }) {
                   </tr>
                 ))}
               </tbody>
-            </table>
+            </table></div>
           </div>
         </>
       )}
@@ -4871,8 +5277,8 @@ function MartingaleDepthPanel({ trades }) {
     const row = winRateData.find((d) => d.name === payload.value);
     return (
       <g transform={`translate(${x},${y})`}>
-        <text x={0} y={0} dy={12} textAnchor="middle" fill="var(--text-dim)" fontSize={11} fontFamily="JetBrains Mono, monospace">{payload.value}</text>
-        <text x={0} y={0} dy={25} textAnchor="middle" fill="#545B68" fontSize={9.5} fontFamily="JetBrains Mono, monospace">n={row ? row.n : 0}</text>
+        <text x={0} y={0} dy={12} textAnchor="middle" fill="var(--text-dim)" fontSize={11} fontFamily="Inter, sans-serif">{payload.value}</text>
+        <text x={0} y={0} dy={25} textAnchor="middle" fill="var(--text-dim)" fontSize={9.5} fontFamily="Inter, sans-serif">n={row ? row.n : 0}</text>
       </g>
     );
   };
@@ -4909,17 +5315,17 @@ function MartingaleDepthPanel({ trades }) {
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))", gap: 14 }}>
         <div>
-          <div className="fj-sub" style={{ marginBottom: 6, fontSize: 11.5, textTransform: "uppercase", letterSpacing: 0.4 }}>
+          <div className="fj-sub" style={{ marginBottom: 6, fontSize: 11.5, letterSpacing: 0 }}>
             Win rate by size (95% CI)
           </div>
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={winRateData} margin={{ top: 4, right: 8, left: -10, bottom: 4 }}>
               <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
               <XAxis dataKey="name" stroke="var(--text-dim)" tick={winRateTick} interval={0} height={38} />
-              <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} domain={[0, 100]} unit="%" />
-              <ReferenceLine y={overallWinRate} stroke="#D9A441" strokeDasharray="4 3" label={{ value: "blended", position: "insideTopRight", fill: "#D9A441", fontSize: 10 }} />
+              <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "Inter" }} domain={[0, 100]} unit="%" />
+              <ReferenceLine y={overallWinRate} stroke="var(--amber)" strokeDasharray="4 3" label={{ value: "blended", position: "insideTopRight", fill: "var(--amber)", fontSize: 10 }} />
               <Tooltip
-                contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+                contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "Inter", fontSize: 12 }}
                 labelStyle={{ color: "var(--text-bright)", fontWeight: 600, marginBottom: 4 }}
                 itemStyle={{ color: "var(--text-bright)" }}
                 cursor={{ fill: "rgba(139,146,158,0.08)" }}
@@ -4927,7 +5333,7 @@ function MartingaleDepthPanel({ trades }) {
               />
               <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
                 {winRateData.map((d, i) => (
-                  <Cell key={i} fill={d.winRate >= overallWinRate ? "#5FA37A" : "#C2634A"} />
+                  <Cell key={i} fill={d.winRate >= overallWinRate ? "var(--profit)" : "var(--loss)"} />
                 ))}
                 <ErrorBar dataKey="ciDelta" width={4} strokeWidth={1.25} stroke="var(--text-dim)" />
               </Bar>
@@ -4936,25 +5342,25 @@ function MartingaleDepthPanel({ trades }) {
         </div>
 
         <div>
-          <div className="fj-sub" style={{ marginBottom: 6, fontSize: 11.5, textTransform: "uppercase", letterSpacing: 0.4 }}>
+          <div className="fj-sub" style={{ marginBottom: 6, fontSize: 11.5, letterSpacing: 0 }}>
             Expected value per contract by size
           </div>
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={evData} margin={{ top: 4, right: 8, left: -10, bottom: 4 }}>
               <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
               <XAxis dataKey="name" stroke="var(--text-dim)" tick={winRateTick} interval={0} height={38} />
-              <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-              <ReferenceLine y={0} stroke="#3A4150" />
-              <ReferenceLine y={overallExpectancyPerContract} stroke="#D9A441" strokeDasharray="4 3" label={{ value: "blended", position: "insideTopRight", fill: "#D9A441", fontSize: 10 }} />
+              <YAxis stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "Inter" }} />
+              <ReferenceLine y={0} stroke="var(--border-strong)" />
+              <ReferenceLine y={overallExpectancyPerContract} stroke="var(--amber)" strokeDasharray="4 3" label={{ value: "blended", position: "insideTopRight", fill: "var(--amber)", fontSize: 10 }} />
               <Tooltip
-                contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+                contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "Inter", fontSize: 12 }}
                 labelStyle={{ color: "var(--text-bright)", fontWeight: 600, marginBottom: 4 }}
                 itemStyle={{ color: "var(--text-bright)" }}
                 cursor={{ fill: "rgba(139,146,158,0.08)" }}
                 formatter={(v, key, item) => [`${money(v)}/contract (n=${item.payload.n})`, "EV"]}
               />
               <Bar dataKey="ev" radius={[4, 4, 0, 0]}>
-                {evData.map((d, i) => <Cell key={i} fill={d.ev >= 0 ? "#5FA37A" : "#C2634A"} />)}
+                {evData.map((d, i) => <Cell key={i} fill={d.ev >= 0 ? "var(--profit)" : "var(--loss)"} />)}
               </Bar>
             </BarChart>
           </ResponsiveContainer>
@@ -5016,7 +5422,7 @@ function DailyLossLimitPanel({ trades }) {
       </div>
 
       <div style={{ display: "flex", alignItems: "baseline", gap: 14, flexWrap: "wrap", marginBottom: 12 }}>
-        <div className="fj-loss" style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 30, fontWeight: 700 }}>
+        <div className="fj-loss" style={{ fontFamily: "'Inter', sans-serif", fontSize: 30, fontWeight: 700 }}>
           {money(limit)}
         </div>
         <div className="fj-seg-toggle">
@@ -5072,7 +5478,7 @@ function RiskOfRuinPanel({ trades }) {
         </div>
       </div>
 
-      <div className={severity} style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 30, fontWeight: 700, marginBottom: 10 }}>
+      <div className={severity} style={{ fontFamily: "'Inter', sans-serif", fontSize: 30, fontWeight: 700, marginBottom: 10 }}>
         {rorPct.toFixed(1)}%
       </div>
 
@@ -5208,8 +5614,9 @@ function DetailView({ selected, trades, settings, strategies, notes, accounts, o
   const idx = list.indexOf(selected.key);
   const [showAddNote, setShowAddNote] = useState(false);
   const [editingNoteId, setEditingNoteId] = useState(null);
+  const [tab, setTab] = useState("overview"); // overview | performance | risk | trades | notes
 
-  useEffect(() => { setShowAddNote(false); setEditingNoteId(null); }, [selected.type, selected.key]);
+  useEffect(() => { setShowAddNote(false); setEditingNoteId(null); setTab("overview"); }, [selected.type, selected.key]);
 
   const entityNotes = useMemo(
     () => notes.filter((n) => getNoteLinks(n).some((l) => l.type === selected.type && l.key === selected.key))
@@ -5232,8 +5639,14 @@ function DetailView({ selected, trades, settings, strategies, notes, accounts, o
   const shortTrades = useMemo(() => entityTrades.filter((t) => t.direction === "Short"), [entityTrades]);
   const longStats = useMemo(() => calcStats(longTrades), [longTrades]);
   const shortStats = useMemo(() => calcStats(shortTrades), [shortTrades]);
-  const accent = isStrategy ? ACCENT_PALETTE[idx >= 0 ? idx % ACCENT_PALETTE.length : 0] : (settings[selected.key]?.accent || "#D9A441");
+  const accent = isStrategy ? ACCENT_PALETTE[idx >= 0 ? idx % ACCENT_PALETTE.length : 0] : (settings[selected.key]?.accent || "var(--amber)");
   const grade = useMemo(() => (isStrategy ? computeStrategyGrade(entityTrades, { settings }) : null), [isStrategy, entityTrades, settings]);
+
+  const tabs = [
+    ["overview", "Overview"], ["performance", "Performance"],
+    ...(isStrategy ? [["risk", "Risk"]] : []),
+    ["trades", `Trades · ${entityTrades.length}`], ["notes", `Notes · ${entityNotes.length}`],
+  ];
 
   const goPrev = () => { if (list.length === 0) return; onNavigate(selected.type, list[(idx - 1 + list.length) % list.length]); };
   const goNext = () => { if (list.length === 0) return; onNavigate(selected.type, list[(idx + 1) % list.length]); };
@@ -5242,112 +5655,138 @@ function DetailView({ selected, trades, settings, strategies, notes, accounts, o
     <div>
       <button className="fj-back-btn" onClick={onBack}><ArrowLeft size={15} /> Back to dashboard</button>
 
-      <div className="fj-detail-head">
+      <div className="fj-dash-grid">
         <div>
-          <div className="fj-sub" style={{ textTransform: "uppercase", letterSpacing: 0.5, fontSize: 11 }}>{isStrategy ? "Strategy" : "Market"}</div>
-          <div className="fj-detail-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <span>{selected.key}{!isStrategy && settings[selected.key] && ` — ${settings[selected.key].label}`}</span>
-            {grade && <GradeBadge grade={grade} />}
+          <div className="fj-detail-head" style={{ marginBottom: 0 }}>
+            <div>
+              <div className="fj-sub" style={{ fontSize: 12.5 }}>{isStrategy ? "Strategy" : "Market"}</div>
+              <div className="fj-detail-title" style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span>{selected.key}{!isStrategy && settings[selected.key] && ` · ${settings[selected.key].label}`}</span>
+                {grade && <GradeBadge grade={grade} />}
+              </div>
+              <div className={`fj-hero-value ${stats.n === 0 ? "fj-neutral" : stats.totalPnl >= 0 ? "fj-profit" : "fj-loss"}`}>{stats.n ? money(stats.totalPnl) : "$0.00"}</div>
+              <div className="fj-hero-meta" style={{ marginTop: 6 }}>
+                Net P&amp;L after fees · {stats.n} trade{stats.n === 1 ? "" : "s"}{stats.n > 0 && ` · peak ${money(Math.max(...curve.map((p) => p.equity)))}`}
+              </div>
+            </div>
+            {list.length > 1 && (
+              <div style={{ display: "flex", gap: 6 }}>
+                <button className="fj-iconbtn" style={{ border: "1px solid var(--border)", borderRadius: 7 }} onClick={goPrev} aria-label="Previous"><ChevronLeft size={16} /></button>
+                <button className="fj-iconbtn" style={{ border: "1px solid var(--border)", borderRadius: 7 }} onClick={goNext} aria-label="Next"><ChevronRight size={16} /></button>
+              </div>
+            )}
           </div>
-          <div className="fj-sub" style={{ marginTop: 3 }}>{stats.n} trade{stats.n === 1 ? "" : "s"}</div>
+          {stats.n > 0 && (
+            <div className="fj-hero-chart">
+              <EquityChart curve={curve} color={accent} changeNotes={entityNotes} />
+            </div>
+          )}
         </div>
-        {list.length > 1 && (
-          <div style={{ display: "flex", gap: 6 }}>
-            <button className="fj-iconbtn" style={{ border: "1px solid var(--border)", borderRadius: 7 }} onClick={goPrev}><ChevronLeft size={16} /></button>
-            <button className="fj-iconbtn" style={{ border: "1px solid var(--border)", borderRadius: 7 }} onClick={goNext}><ChevronRight size={16} /></button>
-          </div>
-        )}
+        <aside className="fj-side"><StatList stats={stats} /></aside>
       </div>
-
-      <div className="fj-panel">
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: showAddNote ? 12 : 0 }}>
-          <div>
-            <p className="fj-panel-title" style={{ margin: 0 }}>Notes</p>
-            <div className="fj-sub" style={{ marginTop: 2 }}>{entityNotes.length} logged — shown inline in the trade log below, on the date they happened.</div>
-          </div>
-          <button className="fj-btn" style={{ padding: "5px 10px" }} onClick={() => setShowAddNote((s) => !s)}><Plus size={13} /> Add note</button>
-        </div>
-        {showAddNote && (
-          <div style={{ marginTop: 12 }}>
-            <NoteForm
-              strategies={strategies} settings={settings} accounts={accounts}
-              defaultLinks={[{ type: selected.type, key: selected.key }]}
-              onSave={(note) => { onAddNote(note); setShowAddNote(false); }}
-              onCancel={() => setShowAddNote(false)}
-            />
-          </div>
-        )}
-      </div>
-
-      <StatGrid stats={stats} />
-
-      {isStrategy && grade && <StrategyGradePanel grade={grade} />}
-
-      <ChangeComparisonPanel trades={entityTrades} notes={entityNotes} />
-
-      {stats.n > 0 && (
-        <div className="fj-panel">
-          <p className="fj-panel-title">Long vs Short</p>
-          <LongShortTable longStats={longStats} shortStats={shortStats} />
-        </div>
-      )}
 
       {stats.n === 0 ? (
         <div className="fj-empty">No trades logged for this {isStrategy ? "strategy" : "market"} yet.</div>
       ) : (
         <>
-          <div className="fj-panel">
-            <p className="fj-panel-title">Equity curve</p>
-            <EquityChart curve={curve} color={accent} changeNotes={entityNotes} />
-          </div>
-
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 14 }}>
-            <div className="fj-panel">
-              <p className="fj-panel-title">Daily &amp; weekly P&amp;L</p>
-              <CalendarHeatmap trades={entityTrades} />
-            </div>
-            <div className="fj-panel">
-              <p className="fj-panel-title">Day of week × hour of day</p>
-              <DowHourHeatmap trades={entityTrades} />
-            </div>
-            <div className="fj-panel">
-              <p className="fj-panel-title">Every trade, plotted</p>
-              <TradeScatterChart trades={entityTrades} settings={settings} strategies={strategies} />
+          <div className="fj-tabbar">
+            <div className="fj-pills" role="tablist">
+              {tabs.map(([k, label]) => (
+                <button key={k} role="tab" aria-selected={tab === k} className={`fj-pill lg ${tab === k ? "active" : ""}`} onClick={() => setTab(k)}>{label}</button>
+              ))}
             </div>
           </div>
 
-          <div className="fj-panel">
-            <p className="fj-panel-title">Stats by time window</p>
-            <WindowStatsPanel trades={entityTrades} />
-          </div>
+          {tab === "overview" && (
+            <div style={{ paddingTop: 16 }}>
+              {isStrategy && grade && <StrategyGradePanel grade={grade} />}
+              <div className="fj-two-col" style={{ marginTop: 0 }}>
+                <div style={{ gridColumn: "1 / -1" }}>
+                  <h3 className="fj-sub-title">Long vs short</h3>
+                  <LongShortTable longStats={longStats} shortStats={shortStats} />
+                </div>
+                <div>
+                  <h3 className="fj-sub-title">Daily &amp; weekly P&amp;L</h3>
+                  <CalendarHeatmap trades={entityTrades} />
+                </div>
+                <div>
+                  <h3 className="fj-sub-title">Day of week × hour of day</h3>
+                  <DowHourHeatmap trades={entityTrades} />
+                </div>
+              </div>
+            </div>
+          )}
 
-          {isStrategy && <MartingaleDepthPanel trades={entityTrades} />}
+          {tab === "performance" && (
+            <div className="fj-two-col" style={{ marginTop: 16 }}>
+              <div style={{ gridColumn: "1 / -1" }}>
+                <h3 className="fj-sub-title">Stats by time window</h3>
+                <WindowStatsPanel trades={entityTrades} />
+              </div>
+              <div style={{ gridColumn: "1 / -1" }}>
+                <h3 className="fj-sub-title">Every trade, plotted</h3>
+                <TradeScatterChart trades={entityTrades} settings={settings} strategies={strategies} />
+              </div>
+            </div>
+          )}
 
-          {isStrategy && <DailyLossLimitPanel trades={entityTrades} />}
-          {isStrategy && <RiskOfRuinPanel trades={entityTrades} />}
-          {isStrategy && <ConsecutiveLossPanel trades={entityTrades} />}
+          {tab === "risk" && isStrategy && (
+            <div style={{ paddingTop: 16 }}>
+              <MartingaleDepthPanel trades={entityTrades} />
+              <div className="fj-two-col" style={{ marginTop: 0 }}>
+                <DailyLossLimitPanel trades={entityTrades} />
+                <RiskOfRuinPanel trades={entityTrades} />
+                <div style={{ gridColumn: "1 / -1" }}><ConsecutiveLossPanel trades={entityTrades} /></div>
+              </div>
+            </div>
+          )}
 
-          <div className="fj-panel">
-            <p className="fj-panel-title">Trade log</p>
-            <TradeLog
-              trades={entityTrades}
-              notes={entityNotes}
-              strategies={strategies} settings={settings} accounts={accounts}
-              editingNoteId={editingNoteId} onEditNote={setEditingNoteId}
-              onSaveNoteEdit={(patch) => { onUpdateNote(editingNoteId, patch); setEditingNoteId(null); }}
-              onCancelNoteEdit={() => setEditingNoteId(null)}
-              onDeleteNote={onDeleteNote}
-              onEdit={onEdit} onDelete={onDelete}
-              onBulkUpdate={onBulkUpdate}
-              onBulkCopy={onBulkCopy}
-            />
-          </div>
+          {tab === "trades" && (
+            <div style={{ paddingTop: 16 }}>
+              <TradeLog
+                trades={entityTrades}
+                notes={entityNotes}
+                strategies={strategies} settings={settings} accounts={accounts}
+                editingNoteId={editingNoteId} onEditNote={setEditingNoteId}
+                onSaveNoteEdit={(patch) => { onUpdateNote(editingNoteId, patch); setEditingNoteId(null); }}
+                onCancelNoteEdit={() => setEditingNoteId(null)}
+                onDeleteNote={onDeleteNote}
+                onEdit={onEdit} onDelete={onDelete}
+                onBulkUpdate={onBulkUpdate}
+                onBulkCopy={onBulkCopy}
+              />
+            </div>
+          )}
+
+          {tab === "notes" && (
+            <div style={{ paddingTop: 16 }}>
+              <div className="fj-panel">
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: showAddNote ? 12 : 0 }}>
+                  <div>
+                    <p className="fj-panel-title" style={{ margin: 0 }}>Notes</p>
+                    <div className="fj-sub" style={{ marginTop: 2 }}>{entityNotes.length} logged — also shown in the trade log on the date they happened.</div>
+                  </div>
+                  <button className="fj-btn" onClick={() => setShowAddNote((v) => !v)}><Plus size={14} /> Add note</button>
+                </div>
+                {showAddNote && (
+                  <div style={{ marginTop: 12 }}>
+                    <NoteForm
+                      strategies={strategies} settings={settings} accounts={accounts}
+                      defaultLinks={[{ type: selected.type, key: selected.key }]}
+                      onSave={(note) => { onAddNote(note); setShowAddNote(false); }}
+                      onCancel={() => setShowAddNote(false)}
+                    />
+                  </div>
+                )}
+              </div>
+              <ChangeComparisonPanel trades={entityTrades} notes={entityNotes} />
+            </div>
+          )}
         </>
       )}
     </div>
   );
 }
-
 
 function TradeScatterChart({ trades, settings, strategies }) {
   const [colorMode, setColorMode] = useState("outcome"); // outcome | market | strategy
@@ -5381,7 +5820,7 @@ function TradeScatterChart({ trades, settings, strategies }) {
       const idx = strategies.indexOf(point.strategy);
       return ACCENT_PALETTE[idx >= 0 ? idx % ACCENT_PALETTE.length : 0];
     }
-    return point.pnl >= 0 ? "#5FA37A" : "#C2634A";
+    return point.pnl >= 0 ? "var(--profit)" : "var(--loss)";
   };
 
   const toggleHighlight = (label) => setHighlighted((h) => h === label ? null : label);
@@ -5396,8 +5835,8 @@ function TradeScatterChart({ trades, settings, strategies }) {
       return items;
     }
     return [
-      { label: "Win", color: "#5FA37A" },
-      { label: "Loss", color: "#C2634A" },
+      { label: "Win", color: "var(--profit)" },
+      { label: "Loss", color: "var(--loss)" },
     ];
   }, [colorMode, settings, strategies, data]);
 
@@ -5419,11 +5858,11 @@ function TradeScatterChart({ trades, settings, strategies }) {
           <ScatterChart margin={{ top: 8, right: 20, left: -10, bottom: 0 }}>
             <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" horizontal={true} vertical={false} />
             <XAxis type="number" dataKey="x" domain={[-0.15, 1.15]} hide />
-            <YAxis type="number" dataKey="pnl" name="P&L" stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "JetBrains Mono" }} />
-            <ReferenceLine y={0} stroke="#3A4150" />
+            <YAxis type="number" dataKey="pnl" name="P&L" stroke="var(--text-dim)" tick={{ fontSize: 11, fontFamily: "Inter" }} />
+            <ReferenceLine y={0} stroke="var(--border-strong)" />
             <Tooltip
-              cursor={{ strokeDasharray: "3 3", stroke: "#3A4150" }}
-              contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "JetBrains Mono", fontSize: 12 }}
+              cursor={{ strokeDasharray: "3 3", stroke: "var(--border-strong)" }}
+              contentStyle={{ background: "var(--panel-alt)", border: "1px solid var(--border)", borderRadius: 8, fontFamily: "Inter", fontSize: 12 }}
               labelStyle={{ color: "var(--text-bright)", fontWeight: 600, marginBottom: 4 }}
               itemStyle={{ color: "var(--text-bright)" }}
               formatter={(value, name) => {
@@ -5441,7 +5880,7 @@ function TradeScatterChart({ trades, settings, strategies }) {
                 return (
                   <Cell
                     key={point.id}
-                    fill={dimmed ? "#3A4150" : colorFor(point)}
+                    fill={dimmed ? "var(--border-strong)" : colorFor(point)}
                     fillOpacity={dimmed ? 0.25 : 0.9}
                   />
                 );
@@ -5501,12 +5940,12 @@ function DowHourHeatmap({ trades }) {
       <div style={{ display: "inline-block" }}>
         <div style={{ display: "flex", gap: 3, marginLeft: 30, marginBottom: 4 }}>
           {hours.map((h) => (
-            <div key={h} className="fj-sub" style={{ width: 22, textAlign: "center", fontSize: 9.5, fontFamily: "JetBrains Mono" }}>{h}</div>
+            <div key={h} className="fj-sub" style={{ width: 22, textAlign: "center", fontSize: 9.5, fontFamily: "Inter" }}>{h}</div>
           ))}
         </div>
         {DOW_LABELS.map((label, dow) => (
           <div key={label} style={{ display: "flex", alignItems: "center", gap: 3, marginBottom: 3 }}>
-            <div className="fj-sub" style={{ width: 28, fontSize: 11, fontFamily: "JetBrains Mono" }}>{label}</div>
+            <div className="fj-sub" style={{ width: 28, fontSize: 11, fontFamily: "Inter" }}>{label}</div>
             {hours.map((h) => {
               const cell = grid[dow][h];
               return (
@@ -5698,7 +6137,7 @@ function TradeForm({ initial, strategies, accounts, settings, onCancel, onSave }
                     <span
                       key={a.id}
                       className="fj-chip"
-                      style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "#14161B", fontWeight: 600 } : undefined}
+                      style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "var(--on-accent)", fontWeight: 600 } : undefined}
                       onClick={() => toggleTradeAccount(a.name)}
                     >
                       {a.name}
@@ -5743,7 +6182,7 @@ function TradeForm({ initial, strategies, accounts, settings, onCancel, onSave }
           </div>
           {netPnl !== null && Number(fees) !== 0 && (
             <div className="fj-sub" style={{ marginBottom: 12 }}>
-              Net P&amp;L after {money(Number(fees) || 0)} in fees: <b style={{ color: netPnl >= 0 ? "var(--profit)" : "var(--loss)", fontFamily: "JetBrains Mono, monospace" }}>{money(netPnl)}</b> — this is what's saved and used everywhere.
+              Net P&amp;L after {money(Number(fees) || 0)} in fees: <b style={{ color: netPnl >= 0 ? "var(--profit)" : "var(--loss)", fontFamily: "Inter, sans-serif" }}>{money(netPnl)}</b> — this is what's saved and used everywhere.
             </div>
           )}
           {(netPnl === null || Number(fees) === 0) && <div style={{ marginBottom: 12 }} />}
@@ -5887,7 +6326,7 @@ function BulkTradeForm({ strategies, accounts, settings, onCancel, onSave }) {
                   <span
                     key={a.id}
                     className="fj-chip"
-                    style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "#14161B", fontWeight: 600 } : undefined}
+                    style={active ? { background: "var(--amber)", borderColor: "var(--amber)", color: "var(--on-accent)", fontWeight: 600 } : undefined}
                     onClick={() => toggleDefaultAccount(a.name)}
                   >
                     {a.name}
