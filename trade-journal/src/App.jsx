@@ -1101,6 +1101,7 @@ async function saveJSON(key, value) {
 export default function TradingJournal() {
   const [ready, setReady] = useState(false);
   const [trades, setTrades] = useState([]);
+  const [showSignalImport, setShowSignalImport] = useState(false);
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [accounts, setAccounts] = useState([]);
   const [notes, setNotes] = useState([]);
@@ -1185,6 +1186,19 @@ export default function TradingJournal() {
   // with _isCopy so every portfolio-wide total (overall stats, market
   // totals, account balances/drawdown) counts the underlying trade once —
   // only that trade's own strategy page counts the copy.
+  // Attach signal data to the matched trades, and to any copies of them in
+  // other strategies (a copy has the same entry, so the same signal).
+  const applySignalData = (byId) => {
+    setTrades((prev) => prev.map((t) => {
+      if (byId.has(t.id)) { return { ...t, adv: byId.get(t.id) }; }
+      if (t._copiedFrom && byId.has(t._copiedFrom)) return { ...t, adv: byId.get(t._copiedFrom) };
+      return t;
+    }));
+    let c = 0;
+    trades.forEach((t) => { if (!byId.has(t.id) && t._copiedFrom && byId.has(t._copiedFrom)) c++; });
+    return { trades: byId.size, copies: c };
+  };
+
   const handleBulkCopy = (ids, patch) => {
     const idSet = new Set(ids);
     setTrades((prev) => {
@@ -1844,6 +1858,7 @@ export default function TradingJournal() {
         onImportClick={triggerImport}
         onTradovateImportClick={triggerTradovateImport}
         onNinjaTraderImportClick={triggerNinjaImport}
+        onSignalImportClick={() => setShowSignalImport(true)}
         onBackup={handleBackup}
         onRestoreClick={triggerRestore}
         theme={theme}
@@ -1918,6 +1933,10 @@ export default function TradingJournal() {
             </div>
           </div>
         </div>
+      )}
+
+      {showSignalImport && (
+        <SignalImportModal trades={trades} onApply={applySignalData} onClose={() => setShowSignalImport(false)} />
       )}
 
       {ninjaImport && !ninjaImport.error && (
@@ -2057,7 +2076,412 @@ export default function TradingJournal() {
 
 // ---------- header ----------
 
-function Header({ onAdd, onBulkAdd, onSettings, onExport, onImportClick, onTradovateImportClick, onNinjaTraderImportClick, onBackup, onRestoreClick, theme, onToggleTheme }) {
+// ---------- signal sheets ("advanced info") ----------
+//
+// The strategy can export one row per signal with the numbers it saw at entry
+// (strength, ATR, higher-timeframe state, ...) and how the trade moved
+// (max favorable / adverse excursion). We attach those to the journal trade
+// they belong to, matched by entry minute + direction, and analyse them in the
+// strategy's Signals tab. Labels live here so they're easy to correct.
+
+const SIGNAL_FIELDS = {
+  str:    { label: "Entry strength",              kind: "num", entry: true },
+  atr:    { label: "ATR at entry (pts)",          kind: "num", entry: true, dec: 1 },
+  htfStr: { label: "Higher-timeframe strength",   kind: "num", entry: true },
+  slDist: { label: "Stop distance (pts)",         kind: "num", entry: true, dec: 1 },
+  htf:    { label: "Higher timeframe agrees",     kind: "flag", entry: true },
+  chop:   { label: "Chop filter flag",            kind: "flag", entry: true },
+  re:     { label: "Re-entry",                    kind: "flag", entry: true },
+  bars:   { label: "Bars held",                   kind: "num", entry: false },
+  mfe:    { label: "Max favorable move (pts)",    kind: "num", entry: false, dec: 1 },
+  mae:    { label: "Max adverse move (pts)",      kind: "num", entry: false, dec: 1 },
+  be:     { label: "Break-even triggered",        kind: "flag", entry: false },
+};
+
+function parseSignalSheet(text) {
+  const res = Papa.parse(text, { header: true, skipEmptyLines: true });
+  const cols = res.meta.fields || [];
+  const need = ["timestamp", "event", "dir", "px", "mfe", "mae"];
+  if (!need.every((c) => cols.includes(c))) {
+    return { error: "This doesn't look like a signal sheet. It needs timestamp, event, dir, px, mfe and mae columns." };
+  }
+  const pairs = [];
+  let cur = null;
+  res.data.forEach((r) => {
+    if (r.event === "OPEN") cur = r;
+    else if (r.event === "CLOSE" && cur) { pairs.push({ o: cur, c: r }); cur = null; }
+  });
+  if (pairs.length === 0) return { error: "No completed trades (an OPEN followed by a CLOSE) found in this file." };
+  return { pairs, preset: pairs[0].o.preset || "" };
+}
+
+function sheetAdv(o, c) {
+  const n = (v) => { const x = parseFloat(v); return Number.isFinite(x) ? x : null; };
+  const px = n(o.px), sl = n(o.sl), tp = n(o.tp1);
+  return {
+    preset: o.preset || "",
+    str: n(o.str), atr: n(o.atr), htf: n(o.htf), htfStr: n(o.htf_str), re: n(o.re), chop: n(o.chop),
+    slDist: px !== null && sl !== null ? Math.abs(px - sl) : null,
+    tpDist: px !== null && tp !== null ? Math.abs(tp - px) : null,
+    bars: n(c.bars), strX: n(c.str_x), htfX: n(c.htf_x), be: n(c.be), tier: n(c.tier),
+    mfe: n(c.mfe), mae: n(c.mae), exit: c.reason || "",
+  };
+}
+
+// Match each sheet row to a journal trade in one strategy by entry date, minute
+// and direction. Several trades in the same minute are consumed in order.
+function matchSignalSheet(pairs, trades, strategy) {
+  const buckets = new Map();
+  trades.forEach((t) => {
+    if (t._isCopy || t.strategy !== strategy) return;
+    const k = `${t.date}|${t.time}|${t.direction === "Long" ? "L" : "S"}`;
+    if (!buckets.has(k)) buckets.set(k, []);
+    buckets.get(k).push(t);
+  });
+  const matches = [];
+  let unmatched = 0;
+  const shift = (hhmm, d) => {
+    const m = parseInt(hhmm.slice(0, 2), 10) * 60 + parseInt(hhmm.slice(3, 5), 10) + d;
+    if (m < 0 || m >= 1440) return null;
+    return `${String(Math.floor(m / 60)).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`;
+  };
+  const take = (day, hhmm, dir) => {
+    for (const d of [0, -1, 1]) {
+      const hm = d === 0 ? hhmm : shift(hhmm, d);
+      const arr = hm && buckets.get(`${day}|${hm}|${dir}`);
+      if (arr && arr.length) return arr.shift();
+    }
+    return null;
+  };
+  // exact-minute matches first so a near-miss never steals another row's trade
+  const rest = [];
+  pairs.forEach((p) => {
+    const day = p.o.timestamp.slice(0, 10), hm = p.o.timestamp.slice(11, 16);
+    const arr = buckets.get(`${day}|${hm}|${p.o.dir}`);
+    const t = arr && arr.shift();
+    if (t) matches.push({ trade: t, adv: sheetAdv(p.o, p.c) }); else rest.push(p);
+  });
+  rest.forEach((p) => {
+    const t = take(p.o.timestamp.slice(0, 10), p.o.timestamp.slice(11, 16), p.o.dir);
+    if (t) matches.push({ trade: t, adv: sheetAdv(p.o, p.c) }); else unmatched++;
+  });
+  return { matches, unmatched };
+}
+
+function SignalImportModal({ trades, onApply, onClose }) {
+  const [sheets, setSheets] = useState([]);
+  const [error, setError] = useState("");
+  const [done, setDone] = useState(null);
+  const strategyNames = useMemo(() => [...new Set(trades.filter((t) => !t._isCopy && t.strategy).map((t) => t.strategy))].sort(), [trades]);
+
+  const onFiles = async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (files.length === 0) return;
+    setError("");
+    const out = [];
+    for (const f of files) {
+      const parsed = parseSignalSheet(await f.text());
+      if (parsed.error) { setError(`${f.name}: ${parsed.error}`); continue; }
+      const candidates = strategyNames
+        .map((s) => ({ strategy: s, matches: matchSignalSheet(parsed.pairs, trades, s).matches.length }))
+        .sort((a, b) => b.matches - a.matches || a.strategy.localeCompare(b.strategy));
+      out.push({ id: uid(), name: f.name, pairs: parsed.pairs, preset: parsed.preset, candidates, chosen: candidates[0]?.matches > 0 ? candidates[0].strategy : "", first: parsed.pairs[0].o.timestamp, last: parsed.pairs[parsed.pairs.length - 1].o.timestamp });
+    }
+    setSheets((prev) => [...prev, ...out]);
+  };
+
+  const resolved = sheets.map((s) => (s.chosen ? { ...s, ...matchSignalSheet(s.pairs, trades, s.chosen) } : { ...s, matches: [], unmatched: s.pairs.length }));
+  const totalMatched = resolved.reduce((a, s) => a + s.matches.length, 0);
+
+  const apply = () => {
+    const byId = new Map();
+    resolved.forEach((s) => s.matches.forEach((m) => byId.set(m.trade.id, m.adv)));
+    setDone(onApply(byId));
+  };
+
+  return (
+    <div className="fj-modal-backdrop" onClick={onClose}>
+      <div className="fj-modal" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 760 }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+          <p className="fj-panel-title" style={{ margin: 0 }}>Add signal sheets</p>
+          <button className="fj-iconbtn" onClick={onClose} aria-label="Close"><X size={16} /></button>
+        </div>
+        <p className="fj-sub" style={{ marginBottom: 14, maxWidth: 640 }}>
+          Upload the advanced-info CSVs (one per preset). Each row is matched to the journal trade that entered in the same minute in the same direction, then its entry strength, ATR, higher-timeframe state and move data are attached to that trade. Uploading again replaces what's there.
+        </p>
+
+        {done ? (
+          <>
+            <div className="fj-panel" style={{ marginBottom: 14 }}>
+              <b>Attached to {done.trades} trade{done.trades === 1 ? "" : "s"}</b>
+              {done.copies > 0 && <span className="fj-sub"> (plus {done.copies} copied trade{done.copies === 1 ? "" : "s"} in other strategies)</span>}
+              <div className="fj-sub" style={{ marginTop: 4 }}>Open a strategy and choose the Signals tab to analyse it.</div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end" }}><button className="fj-btn primary" onClick={onClose}>Done</button></div>
+          </>
+        ) : (
+          <>
+            <label className="fj-btn" style={{ cursor: "pointer" }}>
+              <Upload size={15} /> Choose CSV files
+              <input type="file" accept=".csv,text/csv" multiple onChange={onFiles} style={{ display: "none" }} />
+            </label>
+            {error && <div className="fj-loss" style={{ marginTop: 10, fontSize: 13 }}>{error}</div>}
+
+            {resolved.length > 0 && (
+              <div className="fj-table-wrap" style={{ marginTop: 14 }}>
+                <table className="fj-table">
+                  <thead><tr><th>File</th><th>Preset</th><th>Journal strategy</th><th style={{ textAlign: "right" }}>Matched</th></tr></thead>
+                  <tbody>
+                    {resolved.map((s) => (
+                      <tr key={s.id}>
+                        <td style={{ maxWidth: 190, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={s.name}>{s.name}</td>
+                        <td>{s.preset || "—"}<div className="fj-sub" style={{ marginTop: 0 }}>{s.first.slice(0, 16)} to {s.last.slice(11, 16)}</div></td>
+                        <td>
+                          <select className="fj-select" value={s.chosen} onChange={(e) => setSheets((prev) => prev.map((x) => x.id === s.id ? { ...x, chosen: e.target.value } : x))}>
+                            <option value="">Skip this file</option>
+                            {s.candidates.map((c) => <option key={c.strategy} value={c.strategy}>{c.strategy} ({c.matches} of {s.pairs.length} match)</option>)}
+                          </select>
+                        </td>
+                        <td style={{ textAlign: "right" }} className={s.chosen && s.unmatched > 0 ? "fj-loss" : ""}>
+                          {s.chosen ? `${s.matches.length} of ${s.pairs.length}` : "—"}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {resolved.some((s) => !s.chosen) && resolved.length > 0 && (
+              <div className="fj-sub" style={{ marginTop: 8 }}>Pick a strategy for any file that shows "Skip this file". If a strategy shows 0 matches, the journal has no trades at those entry times yet. Add or import the trades first, and check that the sheet and journal use the same time zone.</div>
+            )}
+
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
+              <button className="fj-btn" onClick={onClose}>Cancel</button>
+              <button className="fj-btn primary" disabled={totalMatched === 0} onClick={apply} style={totalMatched === 0 ? { opacity: 0.5, cursor: "not-allowed" } : undefined}>
+                Attach to {totalMatched} trade{totalMatched === 1 ? "" : "s"}
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------- signals tab ----------
+
+const sigRowStats = (list) => {
+  const s = calcStats(list);
+  return { n: s.n, win: s.winRate, net: s.totalPnl, avg: s.expectancy, pf: s.profitFactor };
+};
+const fmtPF = (pf) => (pf === null ? "—" : pf === Infinity ? "∞" : pf.toFixed(2));
+const fmtNum = (v, dec) => (v === null || v === undefined ? "—" : Number(v).toFixed(dec ?? (Math.abs(v) >= 100 ? 0 : 1)));
+
+function sigQuartiles(list, key) {
+  const vals = list.filter((t) => t.adv[key] !== null && t.adv[key] !== undefined);
+  if (vals.length < 8) return null;
+  const sorted = [...vals].sort((a, b) => a.adv[key] - b.adv[key]);
+  const q = 4, out = [];
+  for (let i = 0; i < q; i++) {
+    const part = sorted.slice(Math.floor((i * sorted.length) / q), Math.floor(((i + 1) * sorted.length) / q));
+    if (part.length) out.push({ lo: part[0].adv[key], hi: part[part.length - 1].adv[key], list: part });
+  }
+  return out;
+}
+
+function SigBucketTable({ title, note, rows }) {
+  const maxAbs = Math.max(1, ...rows.map((r) => Math.abs(r.s.avg)));
+  return (
+    <div className="fj-panel" style={{ marginBottom: 0 }}>
+      <p className="fj-sub-title" style={{ marginBottom: note ? 2 : 10 }}>{title}</p>
+      {note && <div className="fj-sub" style={{ marginBottom: 8 }}>{note}</div>}
+      <div className="fj-table-wrap">
+        <table className="fj-table">
+          <thead><tr><th>Bucket</th><th style={{ textAlign: "right" }}>Trades</th><th style={{ textAlign: "right" }}>Win %</th><th style={{ textAlign: "right" }}>Net</th><th style={{ textAlign: "right" }}>Avg / trade</th><th style={{ textAlign: "right" }}>PF</th><th style={{ width: 90 }} /></tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.label} style={r.s.n < 10 ? { opacity: 0.55 } : undefined} title={r.s.n < 10 ? "Fewer than 10 trades — too few to trust" : undefined}>
+                <td style={{ whiteSpace: "nowrap" }}>{r.label.split(" · ")[0]}<div className="fj-sub" style={{ marginTop: 0 }}>{r.label.split(" · ")[1]}</div></td>
+                <td style={{ textAlign: "right" }}>{r.s.n}</td>
+                <td style={{ textAlign: "right" }}>{pct(r.s.win)}</td>
+                <td style={{ textAlign: "right" }} className={r.s.net >= 0 ? "fj-profit" : "fj-loss"}>{money(r.s.net)}</td>
+                <td style={{ textAlign: "right" }} className={r.s.avg >= 0 ? "fj-profit" : "fj-loss"}>{money(r.s.avg)}</td>
+                <td style={{ textAlign: "right" }}>{fmtPF(r.s.pf)}</td>
+                <td>
+                  <div style={{ height: 6, borderRadius: 3, background: r.s.avg >= 0 ? "var(--profit)" : "var(--loss)", width: `${Math.max(4, (Math.abs(r.s.avg) / maxAbs) * 100)}%`, opacity: 0.8 }} />
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function SignalAnalysisPanel({ trades, settings }) {
+  const withAdv = useMemo(() => trades.filter((t) => t.adv), [trades]);
+  const [ruleKey, setRuleKey] = useState("str");
+  const [ruleMode, setRuleMode] = useState("gte"); // gte = keep >= threshold, lt = keep < threshold
+  const [ruleVal, setRuleVal] = useState("");
+
+  const entryNum = Object.keys(SIGNAL_FIELDS).filter((k) => SIGNAL_FIELDS[k].kind === "num" && SIGNAL_FIELDS[k].entry);
+  const entryFlag = Object.keys(SIGNAL_FIELDS).filter((k) => SIGNAL_FIELDS[k].kind === "flag" && SIGNAL_FIELDS[k].entry);
+  const ruleField = SIGNAL_FIELDS[ruleKey];
+
+  // winners vs losers
+  const compare = useMemo(() => {
+    const w = withAdv.filter((t) => t.pnl > 0), l = withAdv.filter((t) => t.pnl < 0);
+    const avg = (arr, k) => {
+      const v = arr.map((t) => t.adv[k]).filter((x) => x !== null && x !== undefined);
+      return v.length ? v.reduce((a, b) => a + b, 0) / v.length : null;
+    };
+    return Object.keys(SIGNAL_FIELDS).map((k) => ({ k, win: avg(w, k), loss: avg(l, k) })).filter((r) => r.win !== null || r.loss !== null);
+  }, [withAdv]);
+
+  // excursion
+  const exc = useMemo(() => {
+    const held = withAdv.filter((t) => t.adv.mfe !== null && t.adv.mae !== null);
+    if (held.length === 0) return null;
+    const mult = (t) => (settings[t.market]?.multiplier || 1) * (t.contracts || 1);
+    const pts = (t) => (t.pnl + (Number(t.fees) || 0)) / mult(t);
+    const avg = (f) => held.reduce((s, t) => s + f(t), 0) / held.length;
+    const winners = held.filter((t) => t.pnl > 0);
+    const losers = held.filter((t) => t.pnl < 0);
+    const reached = losers.filter((t) => t.adv.tpDist && t.adv.mfe >= 0.5 * t.adv.tpDist).length;
+    const capture = winners.length ? winners.reduce((s, t) => s + (t.adv.mfe > 0 ? pts(t) / t.adv.mfe : 0), 0) / winners.length : null;
+    return { n: held.length, mfe: avg((t) => t.adv.mfe), mae: avg((t) => Math.abs(t.adv.mae)), capture, losers: losers.length, reached, winMfe: winners.length ? winners.reduce((s, t) => s + t.adv.mfe, 0) / winners.length : null, loseMae: losers.length ? losers.reduce((s, t) => s + Math.abs(t.adv.mae), 0) / losers.length : null };
+  }, [withAdv, settings]);
+
+  // rule test
+  const rule = useMemo(() => {
+    const pool = withAdv.filter((t) => t.adv[ruleKey] !== null && t.adv[ruleKey] !== undefined);
+    let keep;
+    if (ruleField.kind === "flag") {
+      const want = ruleMode === "on" ? 1 : 0;
+      keep = (t) => (t.adv[ruleKey] ? 1 : 0) === want;
+    } else {
+      const v = parseFloat(ruleVal);
+      if (!Number.isFinite(v)) return null;
+      keep = ruleMode === "gte" ? (t) => t.adv[ruleKey] >= v : (t) => t.adv[ruleKey] < v;
+    }
+    const kept = pool.filter(keep), skipped = pool.filter((t) => !keep(t));
+    return { base: calcStats(pool), kept: calcStats(kept), skipped: calcStats(skipped) };
+  }, [withAdv, ruleKey, ruleMode, ruleVal, ruleField]);
+
+  if (withAdv.length === 0) {
+    return <div className="fj-panel" style={{ marginTop: 16 }}><div className="fj-sub">No signal data attached yet. Use Import &amp; export → Signal sheets.</div></div>;
+  }
+
+  const buckets = entryNum.map((k) => {
+    const qs = sigQuartiles(withAdv, k);
+    if (!qs) return null;
+    const dec = SIGNAL_FIELDS[k].dec;
+    return { k, rows: qs.map((b, i) => ({ label: `${["Lowest", "Low-mid", "High-mid", "Highest"][i]} · ${fmtNum(b.lo, dec)}–${fmtNum(b.hi, dec)}`, s: sigRowStats(b.list) })) };
+  }).filter(Boolean);
+  const bucketsBars = (() => {
+    const qs = sigQuartiles(withAdv, "bars");
+    return qs ? { k: "bars", rows: qs.map((b, i) => ({ label: `${["Shortest", "Short-mid", "Long-mid", "Longest"][i]} · ${fmtNum(b.lo, 0)}–${fmtNum(b.hi, 0)}`, s: sigRowStats(b.list) })) } : null;
+  })();
+  const flagTables = [...entryFlag, "be"].map((k) => {
+    const on = withAdv.filter((t) => t.adv[k] === 1), off = withAdv.filter((t) => t.adv[k] === 0);
+    if (on.length === 0 || off.length === 0) return null;
+    return { k, rows: [{ label: "Yes", s: sigRowStats(on) }, { label: "No", s: sigRowStats(off) }] };
+  }).filter(Boolean);
+
+  return (
+    <div style={{ paddingTop: 16, display: "grid", gap: 18 }}>
+      <div className="fj-sub">
+        {withAdv.length} of {trades.length} trades have signal data. Buckets split trades into four equal groups by the value at entry; faded rows have fewer than 10 trades. Column meanings come from the sheet headers and can be renamed in <code>SIGNAL_FIELDS</code>.
+      </div>
+
+      <div className="fj-panel">
+        <p className="fj-sub-title">Winners vs losers: average value</p>
+        <div className="fj-table-wrap">
+          <table className="fj-table">
+            <thead><tr><th>Measure</th><th style={{ textAlign: "right" }}>Winners</th><th style={{ textAlign: "right" }}>Losers</th><th>Known at entry?</th></tr></thead>
+            <tbody>
+              {compare.map((r) => (
+                <tr key={r.k}>
+                  <td>{SIGNAL_FIELDS[r.k].label}</td>
+                  <td style={{ textAlign: "right" }}>{fmtNum(r.win, SIGNAL_FIELDS[r.k].kind === "flag" ? 2 : SIGNAL_FIELDS[r.k].dec)}</td>
+                  <td style={{ textAlign: "right" }}>{fmtNum(r.loss, SIGNAL_FIELDS[r.k].kind === "flag" ? 2 : SIGNAL_FIELDS[r.k].dec)}</td>
+                  <td className="fj-sub">{SIGNAL_FIELDS[r.k].entry ? "Yes" : "No, only after the trade"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="fj-sub" style={{ marginTop: 6 }}>Flags show the share of trades where it was on (0.30 = 30%).</div>
+      </div>
+
+      <div className="fj-two-col" style={{ marginTop: 0 }}>
+        {buckets.map((b) => <SigBucketTable key={b.k} title={SIGNAL_FIELDS[b.k].label} rows={b.rows} />)}
+        {flagTables.map((f) => <SigBucketTable key={f.k} title={SIGNAL_FIELDS[f.k].label} note={SIGNAL_FIELDS[f.k].entry ? undefined : "Only known after the trade, so it explains results but can't be used as an entry filter."} rows={f.rows} />)}
+        {bucketsBars && <SigBucketTable title={SIGNAL_FIELDS.bars.label} note="Only known after the trade." rows={bucketsBars.rows} />}
+      </div>
+
+      {exc && (
+        <div className="fj-panel">
+          <p className="fj-sub-title">How trades moved</p>
+          <div className="fj-table-wrap">
+            <table className="fj-table">
+              <tbody>
+                <tr><td>Average best move in your favor</td><td style={{ textAlign: "right" }}>{exc.mfe.toFixed(1)} pts</td></tr>
+                <tr><td>Average worst move against you</td><td style={{ textAlign: "right" }}>{exc.mae.toFixed(1)} pts</td></tr>
+                {exc.winMfe !== null && <tr><td>Winners: best move reached on average</td><td style={{ textAlign: "right" }}>{exc.winMfe.toFixed(1)} pts</td></tr>}
+                {exc.loseMae !== null && <tr><td>Losers: worst move on average</td><td style={{ textAlign: "right" }}>{exc.loseMae.toFixed(1)} pts</td></tr>}
+                {exc.losers > 0 && <tr><td>Losers that first went at least halfway to the target</td><td style={{ textAlign: "right" }}>{exc.reached} of {exc.losers} ({((exc.reached / exc.losers) * 100).toFixed(0)}%)</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      <div className="fj-panel">
+        <p className="fj-sub-title" style={{ marginBottom: 2 }}>What if you'd skipped some trades?</p>
+        <div className="fj-sub" style={{ marginBottom: 10 }}>Only measures known at entry can be tested. This replays the history you have, so a rule that looks great here can still fail on new trades, especially with a small sample.</div>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
+          <span className="fj-sub">Only take trades where</span>
+          <select className="fj-select" style={{ width: "auto" }} value={ruleKey} onChange={(e) => { setRuleKey(e.target.value); setRuleMode(SIGNAL_FIELDS[e.target.value].kind === "flag" ? "on" : "gte"); }}>
+            {[...entryNum, ...entryFlag].map((k) => <option key={k} value={k}>{SIGNAL_FIELDS[k].label}</option>)}
+          </select>
+          {ruleField.kind === "flag" ? (
+            <select className="fj-select" style={{ width: "auto" }} value={ruleMode} onChange={(e) => setRuleMode(e.target.value)}>
+              <option value="on">is on</option><option value="off">is off</option>
+            </select>
+          ) : (
+            <>
+              <select className="fj-select" style={{ width: "auto" }} value={ruleMode} onChange={(e) => setRuleMode(e.target.value)}>
+                <option value="gte">is at least</option><option value="lt">is below</option>
+              </select>
+              <input className="fj-input" style={{ width: 90 }} inputMode="decimal" placeholder="value" value={ruleVal} onChange={(e) => setRuleVal(e.target.value)} />
+            </>
+          )}
+        </div>
+        {rule ? (
+          <div className="fj-table-wrap">
+            <table className="fj-table">
+              <thead><tr><th /><th style={{ textAlign: "right" }}>All trades</th><th style={{ textAlign: "right" }}>With rule</th><th style={{ textAlign: "right" }}>Skipped</th></tr></thead>
+              <tbody>
+                <tr><td>Trades</td><td style={{ textAlign: "right" }}>{rule.base.n}</td><td style={{ textAlign: "right" }}>{rule.kept.n}</td><td style={{ textAlign: "right" }}>{rule.skipped.n}</td></tr>
+                <tr><td>Win rate</td><td style={{ textAlign: "right" }}>{pct(rule.base.winRate)}</td><td style={{ textAlign: "right" }}>{pct(rule.kept.winRate)}</td><td style={{ textAlign: "right" }}>{pct(rule.skipped.winRate)}</td></tr>
+                <tr><td>Net P&amp;L</td><td style={{ textAlign: "right" }}>{money(rule.base.totalPnl)}</td><td style={{ textAlign: "right" }} className={rule.kept.totalPnl >= rule.base.totalPnl ? "fj-profit" : "fj-loss"}>{money(rule.kept.totalPnl)}</td><td style={{ textAlign: "right" }} className={rule.skipped.totalPnl >= 0 ? "fj-profit" : "fj-loss"}>{money(rule.skipped.totalPnl)}</td></tr>
+                <tr><td>Avg per trade</td><td style={{ textAlign: "right" }}>{money(rule.base.expectancy)}</td><td style={{ textAlign: "right" }}>{money(rule.kept.expectancy)}</td><td style={{ textAlign: "right" }}>{money(rule.skipped.expectancy)}</td></tr>
+                <tr><td>Profit factor</td><td style={{ textAlign: "right" }}>{fmtPF(rule.base.profitFactor)}</td><td style={{ textAlign: "right" }}>{fmtPF(rule.kept.profitFactor)}</td><td style={{ textAlign: "right" }}>{fmtPF(rule.skipped.profitFactor)}</td></tr>
+                <tr><td>Max drawdown</td><td style={{ textAlign: "right" }}>{money(rule.base.maxDD)}</td><td style={{ textAlign: "right" }}>{money(rule.kept.maxDD)}</td><td style={{ textAlign: "right" }}>{money(rule.skipped.maxDD)}</td></tr>
+              </tbody>
+            </table>
+          </div>
+        ) : <div className="fj-sub">{ruleField.kind === "flag" ? "" : "Enter a value to test."}</div>}
+      </div>
+    </div>
+  );
+}
+
+
+function Header({ onAdd, onBulkAdd, onSettings, onExport, onImportClick, onTradovateImportClick, onNinjaTraderImportClick, onSignalImportClick, onBackup, onRestoreClick, theme, onToggleTheme }) {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef(null);
   useEffect(() => {
@@ -2096,6 +2520,7 @@ function Header({ onAdd, onBulkAdd, onSettings, onExport, onImportClick, onTrado
               <div className="fj-menu-group">Import trades</div>
               <button className="fj-menu-item" role="menuitem" onClick={pick(onTradovateImportClick)} title="Import a Tradovate Performance export and tag each trade before saving"><Upload size={15} /> Tradovate CSV</button>
               <button className="fj-menu-item" role="menuitem" onClick={pick(onNinjaTraderImportClick)} title="Import a NinjaTrader Trades export and tag each trade before saving"><Upload size={15} /> NinjaTrader CSV</button>
+              <button className="fj-menu-item" role="menuitem" onClick={pick(onSignalImportClick)} title="Attach strength, ATR and other signal data to trades you already have"><Upload size={15} /> Signal sheets (advanced)</button>
               <button className="fj-menu-item" role="menuitem" onClick={pick(onImportClick)}><Upload size={15} /> Journal CSV</button>
               <div className="fj-menu-sep" />
               <div className="fj-menu-group">Export and backup</div>
@@ -5645,6 +6070,7 @@ function DetailView({ selected, trades, settings, strategies, notes, accounts, o
   const tabs = [
     ["overview", "Overview"], ["performance", "Performance"],
     ...(isStrategy ? [["risk", "Risk"]] : []),
+    ...(isStrategy && entityTrades.some((t) => t.adv) ? [["signals", "Signals"]] : []),
     ["trades", `Trades · ${entityTrades.length}`], ["notes", `Notes · ${entityNotes.length}`],
   ];
 
@@ -5740,6 +6166,8 @@ function DetailView({ selected, trades, settings, strategies, notes, accounts, o
               </div>
             </div>
           )}
+
+          {tab === "signals" && isStrategy && <SignalAnalysisPanel trades={entityTrades} settings={settings} />}
 
           {tab === "trades" && (
             <div style={{ paddingTop: 16 }}>
